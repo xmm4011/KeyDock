@@ -1,0 +1,20 @@
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import readline from 'node:readline';
+const root=path.dirname(new URL(import.meta.url).pathname), task=await realpath(await mkdtemp(path.join(os.tmpdir(),'KeyDock-Agent-')));
+const server=http.createServer((req,res)=>{req.resume();req.on('end',()=>{
+ res.writeHead(200,{'Content-Type':'text/event-stream'});
+ for(const choice of [{delta:{role:'assistant',content:'SDK smoke completed'},finish_reason:null},{delta:{},finish_reason:'stop'}])res.write('data: '+JSON.stringify({id:'fixture',object:'chat.completion.chunk',created:1,model:'fixture-model',choices:[{index:0,...choice}]})+'\n\n');
+ res.end('data: [DONE]\n\n');
+});});
+await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+const child=spawn('/usr/bin/sandbox-exec',['-D','KEYDOCK_TASK_DIR='+task,'-D','KEYDOCK_RUNTIME_DIR='+root,'-D','KEYDOCK_NODE_DIR='+path.dirname(process.execPath),'-f',path.join(root,'sandbox.sb'),process.execPath,path.join(root,'bridge.mjs')],{cwd:task,env:{KEYDOCK_AGENT_CHECKS:'1',PATH:path.dirname(process.execPath)+':/usr/bin:/bin:/usr/sbin:/sbin',TMPDIR:task,LANG:'en_US.UTF-8'},stdio:['pipe','pipe','pipe']});
+let stderr='',settled=false;child.stderr.on('data',d=>stderr+=d);const lines=readline.createInterface({input:child.stdout});
+lines.on('line',line=>{console.log(line);if(JSON.parse(line).type==='settled'){settled=true;child.stdin.end();}});
+child.stdin.write(JSON.stringify({type:'start',task:'Say hello without any tools.',text:'no credentials here',service:{kind:'compatible',baseURL:`http://127.0.0.1:${server.address().port}/v1`,alias:'fixture-only',model:'fixture-model'}})+'\n');
+const timeout=setTimeout(()=>child.kill(),20000);
+const code=await new Promise(resolve=>child.on('exit',resolve));clearTimeout(timeout);server.close();await rm(task,{recursive:true,force:true});
+if(!settled){console.error('FAILED smoke',code,stderr.slice(-3000));process.exitCode=1;}else console.log('PASS official SDK smoke in macOS sandbox');

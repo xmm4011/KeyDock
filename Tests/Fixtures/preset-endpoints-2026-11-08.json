@@ -1,0 +1,528 @@
+{
+  "checked_at": "2026-11-08T12:33:11.376660+00:00",
+  "scope": "Anonymous route/document reachability only; no real account or inference verification",
+  "results": [
+    {
+      "method": "GET",
+      "url": "https://api-docs.deepseek.com/",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api-docs.deepseek.com/api/get-user-balance/",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api-docs.deepseek.com/api/list-models/",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api-docs.deepseek.com/guides/anthropic_api/",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api-docs.deepseek.com/guides/responses_api/",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api.deepseek.com/models",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api.deepseek.com/user/balance",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api.moonshot.cn/v1/models",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://api.moonshot.cn/v1/users/me/balance",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://cloud.baidu.com/doc/qianfan-api/s/Dmba8k71y",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://cloud.baidu.com/doc/qianfan-docs/s/Fm9l6ocai",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://docs.volcengine.com/docs/82379/1494384",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "text/html; charset=UTF-8",
+      "redirect": "/docs/ark/chat-api"
+    },
+    {
+      "method": "GET",
+      "url": "https://docs.volcengine.com/docs/ark/agent-model-invocation-practice",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "text/html; charset=UTF-8",
+      "redirect": "/docs/ark/agent-model-invocation-practice"
+    },
+    {
+      "method": "GET",
+      "url": "https://docs.volcengine.com/docs/ark/messages-api",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "text/html; charset=UTF-8",
+      "redirect": "/docs/ark/messages-api"
+    },
+    {
+      "method": "GET",
+      "url": "https://docs.volcengine.com/docs/billing-center/query-balance-acct-query-user-account-balance-information",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "text/html; charset=UTF-8",
+      "redirect": "/docs/billing-center/query-balance-acct-query-user-account-balance-information"
+    },
+    {
+      "method": "GET",
+      "url": "https://help.aliyun.com/zh/model-studio/anthropic-api-messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://help.aliyun.com/zh/model-studio/base-url",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://help.aliyun.com/zh/model-studio/list-models",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://help.aliyun.com/zh/user-center/developer-reference/api-bssopenapi-2017-12-14-queryaccountbalance",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://intl.cloud.baidu.com/zh/doc/Finance/s/Skhtyytwu-intl",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.baichuan-ai.com/docs-v2/api",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.kimi.com/docs/api/balance",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.kimi.com/docs/api/chat",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.kimi.com/docs/api/list-models",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.kimi.com/docs/api/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://platform.kimi.com/docs/api/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 200,
+      "content_type": "text/html; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://qianfan.baidubce.com/v2/models",
+      "authenticated": false,
+      "model_called": false,
+      "status": 403,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "GET",
+      "url": "https://tcnxnzs113h4.feishu.cn/wiki/I9NJw6lPmiqbNFkQF0TcavXln7b",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "",
+      "redirect": "https://accounts.feishu.cn/accounts/page/login"
+    },
+    {
+      "method": "GET",
+      "url": "https://tcnxnzs113h4.feishu.cn/wiki/JpXbwpfC3iyrkhkFQYVcoYyknRe",
+      "authenticated": false,
+      "model_called": false,
+      "status": 302,
+      "content_type": "",
+      "redirect": "https://accounts.feishu.cn/accounts/page/login"
+    },
+    {
+      "method": "POST",
+      "url": "https://api.baichuan-ai.com/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json;charset=UTF-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.deepseek.com/anthropic/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.deepseek.com/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.deepseek.com/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.moonshot.cn/anthropic/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.moonshot.cn/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://api.moonshot.cn/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://ark.cn-beijing.volces.com/api/compatible/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://ark.cn-beijing.volces.com/api/v3/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://dashscope.aliyuncs.com/apps/anthropic/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 403,
+      "content_type": "application/json",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 400,
+      "content_type": "application/json",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-ca.aigc.exp.bcevod.com/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-ca.aigc.exp.bcevod.com/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-ca.aigc.exp.bcevod.com/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-de.aigc.exp.bcevod.com/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-de.aigc.exp.bcevod.com/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-de.aigc.exp.bcevod.com/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-sg.aigc.exp.bcevod.com/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-sg.aigc.exp.bcevod.com/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://eos-sg.aigc.exp.bcevod.com/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://qianfan.baidubce.com/anthropic/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 422,
+      "content_type": "application/json",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://qianfan.baidubce.com/v2/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://qianfan.baidubce.com/v2/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://vod.gz.baidubce.com/v1/chat/completions",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://vod.gz.baidubce.com/v1/messages",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    },
+    {
+      "method": "POST",
+      "url": "https://vod.gz.baidubce.com/v1/responses",
+      "authenticated": false,
+      "model_called": false,
+      "status": 401,
+      "content_type": "application/json; charset=utf-8",
+      "redirect": ""
+    }
+  ]
+}

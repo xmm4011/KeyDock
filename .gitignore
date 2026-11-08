@@ -1,0 +1,25 @@
+# 构建产物
+.build/
+dist/
+.swiftpm/
+xcuserdata/
+AgentRuntime/node_modules/
+# npm ci 依赖锁文件必须提交（覆盖全局 gitignore 中的 package-lock.json）
+!AgentRuntime/package-lock.json
+
+# 密钥 / 凭据 / 保险库与备份
+.env
+.env.*
+*.kdv
+*.keydock
+*.keydockbackup
+*.pem
+*.p12
+*.key
+*.keychain
+*.keychain-db
+*.mobileprovision
+
+# 系统与日志
+.DS_Store
+*.log
