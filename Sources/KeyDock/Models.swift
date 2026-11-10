@@ -99,6 +99,8 @@ struct CheckResult: Codable, Equatable {
     var requestMethod: String?
     var request: CheckedRequest?
     var response: CheckedResponse?
+    // Seconds from sending the request to reading the whole response.
+    var duration: TimeInterval?
     var displayMessage: String {
         state == .valid && requestMethod == "POST" && message == "当前模型调用验证通过，已产生少量用量。" ? "当前模型调用验证通过。" : message
     }
@@ -178,6 +180,7 @@ struct Credential: Identifiable, Codable, Equatable {
     var check: CheckResult?
     var connectionCheck: CheckResult?
     var verificationHistory: [String: StoredVerification]?
+    var modelProbes: [String: ModelProbe]?
     private var verificationIdentity: String {
         let address = ProviderPreset.matching(baseURL).map { "provider:" + $0.id } ?? baseURL.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let fields = [address, apiKey, extraHeaders, model, inferenceKind.rawValue, verificationURL]
@@ -293,7 +296,7 @@ struct Credential: Identifiable, Codable, Equatable {
         value.rememberProtocol()
         return value
     }
-    private func configuringProtocol(_ kind: ServiceKind) -> Credential {
+    func configuringProtocol(_ kind: ServiceKind) -> Credential {
         var value = self
         if kind != inferenceKind {
             value.kind = kind; value.callTemplate = nil
@@ -478,6 +481,8 @@ struct VaultData: Codable {
     var prefersLocalImport: Bool?
     var showFullContent: Bool?
     var recordAllBodies: Bool?
+    var verificationTimeout: Double?
+    var proxyTimeout: Double?
 }
 
 enum KeyDockError: LocalizedError {

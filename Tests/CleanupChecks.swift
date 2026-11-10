@@ -15,12 +15,12 @@ import Vision
                 let first = store.credentials[0], second = store.credentials[1]
                 recover(first.id, store: store); settle(view)
                 let footer = try footerText(view)
-                if !footer.contains("归档1条") {
+                if !footer.contains("清理1项") {
                     print("Cleanup test footer: " + footer)
                     let bitmap = try unwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds)); view.cacheDisplay(in: view.bounds, to: bitmap)
                     try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".build/model-alignment-cleanup-debug.png"))
                 }
-                expectTrue(footer.contains("归档1条"))
+                expectTrue(footer.contains("清理1项"))
                 try clickArchive(window: window, view: view)
                 let alert = try waitForAlert(window, view: view)
                 let confirm = try confirmationButton(alert)
@@ -77,7 +77,7 @@ import Vision
     private static func clickArchive(window: NSWindow, view: NSView) throws {
         let matches = try labels(view)
         guard let label = matches.first(where: { item in
-            item.boundingBox.midY < 0.18 && item.topCandidates(1).first.map { compact($0.string).range(of: #"归档[0-9]+条"#, options: .regularExpression) != nil } == true
+            item.boundingBox.midY < 0.18 && item.topCandidates(1).first.map { compact($0.string).range(of: #"清理[0-9]+项"#, options: .regularExpression) != nil } == true
         }) else { throw KeyDockError.message("Archive button label missing: " + matches.compactMap { $0.topCandidates(1).first?.string }.joined(separator: " | ")) }
         let box = label.boundingBox
         let point = view.convert(NSPoint(x: box.midX * view.bounds.width, y: (view.isFlipped ? 1 - box.midY : box.midY) * view.bounds.height), to: nil)
@@ -92,7 +92,7 @@ import Vision
     }
     private static func confirmationButton(_ alert: NSWindow) throws -> NSButton {
         let buttons = descendants(try unwrap(alert.contentView)).compactMap { $0 as? NSButton }
-        guard let button = buttons.first(where: { $0.title == "确认归档" }) else { throw KeyDockError.message("Unexpected cleanup confirmation buttons: " + buttons.map(\.title).joined(separator: ", ")) }
+        guard let button = buttons.first(where: { $0.title == "确认清理" }) else { throw KeyDockError.message("Unexpected cleanup confirmation buttons: " + buttons.map(\.title).joined(separator: ", ")) }
         return button
     }
 }

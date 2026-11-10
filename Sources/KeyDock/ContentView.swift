@@ -32,6 +32,8 @@ struct ContentView: View {
     @State private var search = ""
     @FocusState private var focus: FocusTarget?
     @State private var sheet: AppSheet?
+    @State private var confirmBatch = false
+    @State private var batchPlan = BatchPlan()
     @StateObject private var windowContext = WindowCommandContext()
     private var mainCommandsAvailable: Bool {
         sheet == nil && windowContext.allowsMainCommands
@@ -70,6 +72,10 @@ struct ContentView: View {
                 case .cleanup: CleanupView()
                 }
             }
+            .alert("检查全部连接？", isPresented: $confirmBatch) {
+                Button("开始检查") { store.verifyAll() }
+                Button("取消", role: .cancel) {}
+            } message: { Text(batchMessage) }
             .alert("操作未完成", isPresented: Binding(get: { store.error != nil && sheet == nil }, set: { if !$0 { store.error = nil } })) { Button("好") { store.error = nil } } message: { Text(store.displayText(store.error ?? "")) }
             .onReceive(NotificationCenter.default.publisher(for: .keydockImport)) { _ in if store.loadError == nil { beginImport() } }
             .onReceive(NotificationCenter.default.publisher(for: .keydockNew)) { _ in if store.loadError == nil && mainCommandsAvailable { sheet = .editor(Credential()) } }
@@ -99,8 +105,8 @@ struct ContentView: View {
                 SettingsLink { Label("系统设置…", systemImage: "gearshape") }
                 Button("手动添加…", systemImage: "square.and.pencil") { sheet = .editor(Credential()) }
                 Divider()
-                Button("检查全部连接", systemImage: "arrow.clockwise") { store.verifyAll() }.disabled(store.active.isEmpty || store.batchRunning)
-                Button("清理失效 Key…", systemImage: "archivebox") { sheet = .cleanup }
+                Button("检查全部连接…", systemImage: "arrow.clockwise") { batchPlan = store.batchPlan; confirmBatch = true }.disabled(store.active.isEmpty || store.batchRunning)
+                Button("一键清理…", systemImage: "sparkles") { sheet = .cleanup }
                 Divider()
                 Button("加密备份与恢复…", systemImage: "externaldrive") { sheet = .backup }
             } label: { Image(systemName: "ellipsis.circle").font(.system(size: 21)).foregroundStyle(Palette.muted) }.menuStyle(.borderlessButton).frame(width: 28).disabled(store.loadError != nil)
@@ -190,6 +196,11 @@ struct ContentView: View {
             Text("本机加密保存 · 复制使用不带真实 Key").font(.system(size: 10)).foregroundStyle(Palette.muted).padding(.top, 15)
         }.padding(35).frame(maxWidth: 410, alignment: .leading)
     }
+    private var batchMessage: String {
+        let plan = batchPlan
+        guard plan.models > 0 else { return "将检查 \(plan.keys) 条 Key 的连接，不调用模型。" }
+        return "将调用 \(plan.keys) 条 Key 下的全部 \(plan.models) 个模型，各发送一次简短请求并记录耗时，会产生少量用量。" + plan.imageNote + "向量、图片模型分别通过向量和图片接口验证。不同 Key 并行检查，同一 Key 的模型依次调用以免超出限流。没有模型的 Key 只检查连接。"
+    }
     func beginImport() { guard mainCommandsAvailable else { return }; sheet = .importer(ImportPaste.from(.general)) }
 }
 
@@ -214,6 +225,16 @@ struct CredentialCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack { Text(store.displayText(record.title)).font(.system(size: 13, weight: .semibold)).lineLimit(1); Spacer(minLength: 0); if record.favorite { Image(systemName: "star.fill").font(.system(size: 9)).foregroundStyle(.orange) } }
                 Text(store.displayText(searchHint ?? (record.purpose.isEmpty ? record.host : record.purpose))).font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1)
+                if record.kind != .custom, let fastest = record.fastestProbe(in: store.rendering.models(record)), let duration = fastest.probe.duration {
+                    HStack(spacing: 4) {
+                        Image(systemName: "bolt.fill").font(.system(size: 9))
+                        Text(store.displayText(fastest.model)).lineLimit(1).truncationMode(.middle)
+                        Spacer(minLength: 4)
+                        Text(Latency.text(duration)).monospacedDigit().fixedSize()
+                    }.font(.system(size: 11)).foregroundStyle(Palette.teal)
+                        .help("最快可用模型 " + store.displayText(fastest.model) + "，耗时 " + Latency.text(duration))
+                        .accessibilityElement(children: .combine).accessibilityLabel("最快模型 " + store.displayText(fastest.model) + "，" + Latency.text(duration))
+                }
                 if checking { ProgressView().controlSize(.mini) } else { StatusBadge(record: record) }
             }
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(selected ? Palette.accent.opacity(0.055) : Color.clear, in: RoundedRectangle(cornerRadius: 12))

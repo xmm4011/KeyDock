@@ -622,10 +622,14 @@ import Vision
         }
         runCheck("Layout.system-settings-toggles-apply-globally-and-are-readable") {
             try withFixture { store, _ in
-                try render(SystemSettingsView().environmentObject(store), size: NSSize(width: 560, height: 470)) { view in
+                try render(SystemSettingsView().environmentObject(store), size: NSSize(width: 560, height: 760)) { view in
                     let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
                     let before = try recognizedText(capture(view, name: "system-settings-default"))
                     expectTrue(before.contains("系统设置")); expectTrue(before.contains("智能整理")); expectTrue(before.contains("显示完整密钥与请求内容")); expectTrue(before.contains("编辑提示词"))
+                    let compact = before.replacingOccurrences(of: " ", with: "")
+                    if !(compact.contains("验证超时") && compact.contains("代理超时") && compact.contains("1分钟") && compact.contains("1小时")) { print("OCR system settings: " + compact.replacingOccurrences(of: "\n", with: " | ")) }
+                    expectTrue(compact.contains("验证超时")); expectTrue(compact.contains("代理超时")); expectTrue(compact.contains("1分钟")); expectTrue(compact.contains("1小时"))
+                    expectTrue(compact.contains("修改后对新请求生效"))
                     expectFalse(store.showFullContent); expectFalse(store.recordAllBodies)
                     try clickText("显示完整密钥与请求内容", in: view); expectTrue(store.showFullContent)
                     try clickText("为所有 Key 记录请求与响应", in: view); expectTrue(store.recordAllBodies)

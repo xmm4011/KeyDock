@@ -6,17 +6,59 @@ final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sen
     }
 }
 
-struct APIClient {
-    static let delegate = NoRedirectDelegate()
-    static let session: URLSession = {
+// Verification, catalog, balance and agent checks share one session per
+// configured timeout. Only the fixed choices are cached, so sessions stay bounded.
+final class VerificationSessions: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = NetworkTimeouts.defaultVerification
+    private var sessions: [TimeInterval: URLSession] = [:]
+    var timeout: TimeInterval {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); value = newValue; lock.unlock() }
+    }
+    var current: URLSession {
+        lock.lock(); defer { lock.unlock() }
+        return make(value)
+    }
+    // Slow calls such as image generation wait at least `minimum`, or longer when the setting is longer.
+    func session(atLeast minimum: TimeInterval) -> URLSession {
+        lock.lock(); defer { lock.unlock() }
+        return make(max(value, minimum))
+    }
+    private func make(_ value: TimeInterval) -> URLSession {
+        if let session = sessions[value] { return session }
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 18
-        config.timeoutIntervalForResource = 25
+        config.timeoutIntervalForRequest = value
+        config.timeoutIntervalForResource = value
         config.httpCookieStorage = nil
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-    }()
+        let session = URLSession(configuration: config, delegate: APIClient.delegate, delegateQueue: nil)
+        sessions[value] = session; return session
+    }
+}
+
+enum NetworkTimeouts {
+    static let defaultVerification: TimeInterval = 60
+    static let verificationChoices: [TimeInterval] = [30, 60, 120, 300, 600]
+    static let defaultProxy: TimeInterval = 3600
+    static let proxyChoices: [TimeInterval] = [1800, 3600, 7200, 21600, 43200, 86400]
+    static func title(_ value: TimeInterval) -> String {
+        let seconds = Int(value)
+        if seconds < 60 { return "\(seconds) 秒" }
+        if seconds < 3600 { return "\(seconds / 60) 分钟" }
+        return "\(seconds / 3600) 小时"
+    }
+}
+
+struct APIClient {
+    static let delegate = NoRedirectDelegate()
+    static let verificationSessions = VerificationSessions()
+    static var verificationTimeout: TimeInterval {
+        get { verificationSessions.timeout }
+        set { verificationSessions.timeout = newValue }
+    }
+    static var session: URLSession { verificationSessions.current }
 
     static func failureMessage(_ error: Error) -> String {
         if let error = error as? KeyDockError { return error.localizedDescription }
@@ -27,7 +69,7 @@ struct APIClient {
             switch ns.code {
             case NSURLErrorAppTransportSecurityRequiresSecureConnection:
                 reason = "macOS App Transport Security 阻止了 HTTP 请求。这是应用网络配置问题，请更新 KeyDock；无需更换密钥、模型或改成 HTTPS。"
-            case NSURLErrorTimedOut: reason = "请求超时，请检查服务响应与网络连接。"
+            case NSURLErrorTimedOut: reason = "请求超时（等待上限 \(NetworkTimeouts.title(verificationTimeout))），请检查服务响应与网络连接；模型响应较慢时可在系统设置中调大验证超时。"
             case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed: reason = "无法解析服务地址，请检查域名与 DNS。"
             case NSURLErrorCannotConnectToHost: reason = "无法连接服务，请检查地址、端口与网络。"
             case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost: reason = "网络连接不可用或已中断。"
@@ -240,16 +282,20 @@ struct APIClient {
 
     static func verify(_ record: Credential, session: URLSession = APIClient.session, testModel: Bool = false) async -> CheckResult {
         var attempted: URLRequest?
+        let clock = ContinuousClock(), started = clock.now
         do {
             let request = try testModel ? modelTestRequest(for: record) : verificationRequest(for: record)
             attempted = request
             let (data, http) = try await AgentVerification.boundedData(for: request, session: session, limit: 1_048_576)
+            let elapsed = Latency.seconds(clock.now - started)
             var result = classify(status: http.statusCode, data: data, record: record, endpoint: request.url!.absoluteString, testModel: testModel)
             result.response = CheckedResponse(data, response: http, record: record)
-            result.requestMethod = request.httpMethod; result.request = CheckedRequest(request); return result
+            result.requestMethod = request.httpMethod; result.request = CheckedRequest(request); result.duration = elapsed; return result
         } catch {
             let message = LogRedaction.text(failureMessage(error), secret: record.apiKey, otherSecrets: record.secretValues)
-            return CheckResult(state: .uncertain, message: message, endpoint: attempted?.url?.absoluteString ?? "", requestMethod: attempted?.httpMethod, request: attempted.map(CheckedRequest.init))
+            var result = CheckResult(state: .uncertain, message: message, endpoint: attempted?.url?.absoluteString ?? "", requestMethod: attempted?.httpMethod, request: attempted.map(CheckedRequest.init))
+            if attempted != nil { result.duration = Latency.seconds(clock.now - started) }
+            return result
         }
     }
 

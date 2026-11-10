@@ -174,6 +174,11 @@ enum CheckRunner {
             if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
             print("ALL CLEANUP CHECKS PASSED (\(checkCount) scenarios)"); return
         }
+        if CommandLine.arguments.contains("--model-probe-checks") {
+            await ModelProbeChecks.run()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL MODEL PROBE CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
         if CommandLine.arguments.contains("--soak") { await SoakChecks.run(); return }
         if CommandLine.arguments.contains("--proxy-checks") {
             await AdvancedProxyChecks.run()
@@ -243,6 +248,7 @@ enum CheckRunner {
         ListNavigationChecks.run()
         CleanupChecks.run()
         ManualModelChecks.native()
+        await ModelProbeChecks.run()
         // Finish asynchronous service fixtures before the native window suite;
         // AppKit can otherwise end the command-line host on the next idle turn.
         LayoutChecks.run()

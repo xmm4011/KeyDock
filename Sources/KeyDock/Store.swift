@@ -15,6 +15,12 @@ final class VaultStore: ObservableObject {
     @Published var balanceChecking = Set<UUID>()
     @Published var batchRunning = false
     @Published var batchProgress = ""
+    // Models already answered / planned for each Key while its models are checked.
+    @Published private(set) var modelProbeProgress: [UUID: ProbeProgress] = [:]
+    // Different Keys run in parallel; one Key's models go one at a time so a
+    // check stays within that Key's rate limit and timings are not queued.
+    static let batchKeyConcurrency = 8
+    private var batchCounts = BatchCounts()
     let disk: EncryptedVault
     let proxy: LocalProxy
     let userEnvironment: UserEnvironment
@@ -35,6 +41,20 @@ final class VaultStore: ObservableObject {
     var selected: Credential? { data.credentials.first { $0.id == selectedID } }
     var active: [Credential] { credentials.filter { !$0.archived } }
     var cleanup: [Credential] { credentials.filter(\.cleanupCandidate) }
+    // Models whose last call failed, on Keys that still answer for another model:
+    // ones the service reported gone, and other failures except quota limits.
+    // The selected model is never removed automatically.
+    var modelCleanup: [ModelCleanupItem] { modelCleanupRows.filter { !$0.inUse } }
+    var modelCleanupRows: [ModelCleanupItem] {
+        credentials.filter { !$0.archived && !$0.cleanupCandidate && $0.kind != .custom && $0.modelProbes != nil }.flatMap { record -> [ModelCleanupItem] in
+            let listed = Set(rendering.models(record)), current = record.model.trimmed, serves = record.servesSomeModel
+            return (record.modelProbes ?? [:]).filter { listed.contains($0.key) && $0.value.cleanable }.sorted { $0.key < $1.key }.compactMap { name, probe in
+                if name == current { return probe.unavailable ? ModelCleanupItem(credentialID: record.id, model: name, inUse: true) : nil }
+                guard serves else { return nil }
+                return ModelCleanupItem(credentialID: record.id, model: name, offline: probe.unavailable)
+            }
+        }
+    }
     var showFullContent: Bool { data.showFullContent ?? false }
     var recordAllBodies: Bool { data.recordAllBodies ?? false }
     var capturedCredentialIDs: Set<UUID> { recordAllBodies ? Set(credentials.map(\.id)) : history.captureBodies }
@@ -44,6 +64,20 @@ final class VaultStore: ObservableObject {
     func listing(shelf: Shelf, search: String) -> CredentialListProjection { rendering.list(credentials, shelf: shelf, query: search) }
     @discardableResult func setShowFullContent(_ value: Bool) -> Bool { commit { $0.showFullContent = value } }
     @discardableResult func setRecordAllBodies(_ value: Bool) -> Bool { commit { $0.recordAllBodies = value } }
+    var verificationTimeout: TimeInterval { data.verificationTimeout.flatMap { NetworkTimeouts.verificationChoices.contains($0) ? $0 : nil } ?? NetworkTimeouts.defaultVerification }
+    var proxyTimeout: TimeInterval { data.proxyTimeout.flatMap { NetworkTimeouts.proxyChoices.contains($0) ? $0 : nil } ?? NetworkTimeouts.defaultProxy }
+    @discardableResult func setVerificationTimeout(_ value: TimeInterval) -> Bool {
+        guard NetworkTimeouts.verificationChoices.contains(value) else { error = "不支持此验证超时时长。"; return false }
+        return commit { $0.verificationTimeout = value }
+    }
+    @discardableResult func setProxyTimeout(_ value: TimeInterval) -> Bool {
+        guard NetworkTimeouts.proxyChoices.contains(value) else { error = "不支持此代理超时时长。"; return false }
+        return commit { $0.proxyTimeout = value }
+    }
+    private func applyNetworkSettings() {
+        APIClient.verificationTimeout = verificationTimeout
+        proxy.setUpstreamIdleTimeout(proxyTimeout)
+    }
     func displayText(_ text: String, additionalSecrets: [String] = []) -> String {
         logDisplayPolicy.text(text, extra: additionalSecrets)
     }
@@ -91,7 +125,7 @@ final class VaultStore: ObservableObject {
         guard let current = credentials.first(where: { $0.id == record.id }), current.updatedAt == record.updatedAt else { error = "此条目已更新，请重新选择协议。"; return }
         guard kind != .custom, current.kind != .custom, !current.archived else { return }
         var changed = current.selectingProtocol(kind)
-        changed.restoreVerification(from: current)
+        changed.restoreVerification(from: current); changed.adoptProbedCheck()
         guard changed != current else { return }
         _ = commit { next in
             guard let index = next.credentials.firstIndex(where: { $0.id == current.id }) else { return }
@@ -114,7 +148,7 @@ final class VaultStore: ObservableObject {
         }
         if adding { value.rememberModel(name) }
         guard value != current else { return true }
-        value.restoreVerification(from: current)
+        value.restoreVerification(from: current); value.adoptProbedCheck()
         value.updatedAt = Date()
         return commit { next in
             if let index = next.credentials.firstIndex(where: { $0.id == current.id }) { next.credentials[index] = value }
@@ -146,7 +180,7 @@ final class VaultStore: ObservableObject {
             selectedID = active.first?.id
             synchronizeEnvironment()
             history.retryLoading(); history.synchronize(Set(credentials.map(\.id)))
-            configureHistory()
+            configureHistory(); applyNetworkSettings()
             proxy.update(credentials); if automaticProxy { proxy.start() }
         } catch { loadError = error.localizedDescription; revision = try? disk.revision(); proxy.update([]); proxy.stop() }
     }
@@ -162,7 +196,7 @@ final class VaultStore: ObservableObject {
         do {
             var next = data; try change(&next)
             if let id = next.organizerServiceID, !next.credentials.contains(where: { $0.id == id }) { next.organizerServiceID = nil; next.organizerModel = nil }
-            revision = try disk.save(next, replacing: revision); data = next; proxy.update(credentials)
+            revision = try disk.save(next, replacing: revision); data = next; proxy.update(credentials); applyNetworkSettings()
             history.synchronize(Set(credentials.map(\.id))); configureHistory()
             do { try userEnvironment.synchronize(credentials.map(environmentRecord)); installedEnvironmentIDs = Set(userEnvironment.entries.map(\.id)) }
             catch { self.error = "记录已保存，但系统变量未更新：" + error.localizedDescription }
@@ -236,11 +270,13 @@ final class VaultStore: ObservableObject {
             let verificationChanged = authChanged || old.kind != record.kind || old.callTemplate != record.callTemplate || old.verificationURL != record.verificationURL
             record.check = verificationChanged || (old.model != record.model && old.check?.requestMethod == "POST") ? nil : old.check
             record.connectionCheck = verificationChanged ? nil : old.connectionCheck
+            // Per-model results describe this Key at this address; another Key starts over.
+            record.modelProbes = authChanged ? nil : old.modelProbes
             let sameProviderKey = ProviderPreset.matching(record.baseURL) != nil && record.fingerprint == old.fingerprint
             let catalogChanged = old.verificationURL != record.verificationURL || ((authChanged || old.kind != record.kind || old.inferenceKind != record.inferenceKind) && !sameProviderKey)
             record.modelCatalog = catalogChanged ? nil : (old.modelCatalog ?? (old.availableModels.isEmpty ? nil : ModelCatalog(models: old.availableModels)))
             let sameService = old.apiKey == record.apiKey && old.extraHeaders == record.extraHeaders && (old.baseURL == record.baseURL || sameProviderKey)
-            if sameService && (old.model != record.model || old.inferenceKind != record.inferenceKind) { record.restoreVerification(from: old) }
+            if sameService && (old.model != record.model || old.inferenceKind != record.inferenceKind) { record.restoreVerification(from: old); record.adoptProbedCheck() }
             else if verificationChanged { record.verificationHistory = nil }
             else { record.verificationHistory = old.verificationHistory }
             record.favorite = old.favorite; record.archived = old.archived; record.createdAt = old.createdAt
@@ -256,6 +292,23 @@ final class VaultStore: ObservableObject {
     func addModel(_ name: String, to record: Credential) -> Bool {
         guard let current = credentials.first(where: { $0.id == record.id }), current.hasSameConnection(as: record) else { error = "此 Key 的连接配置已修改或条目已删除，请关闭后重新添加模型。"; return false }
         return updateModel(name.trimmed, current: current, adding: true)
+    }
+    func removeModel(_ name: String, from record: Credential) -> Bool {
+        guard let current = credentials.first(where: { $0.id == record.id }), current.hasSameConnection(as: record) else { error = "此 Key 的连接配置已修改或条目已删除，请重新打开后再移除模型。"; return false }
+        guard !current.archived, current.kind != .custom else { error = "请先恢复此 Key，再管理模型。"; return false }
+        let target = name.trimmed
+        guard target != current.model.trimmed else { error = "此模型正在使用，请先切换到其他模型再移除。"; return false }
+        guard current.modelOptions.contains(target) else { return true }
+        // Any listed model, added by hand or fetched from the service. A later
+        // refresh of the model list may bring a fetched model back.
+        var value = current
+        value.removeModels([target])
+        value.updatedAt = Date()
+        let success = commit { next in
+            if let index = next.credentials.firstIndex(where: { $0.id == current.id }) { next.credentials[index] = value }
+        }
+        if success { showToast("已移除模型") }
+        return success
     }
 
     func configureOrganizer(serviceID: UUID?, model: String) -> Bool {
@@ -327,6 +380,25 @@ final class VaultStore: ObservableObject {
             for i in next.credentials.indices where ids.contains(next.credentials[i].id) { next.credentials[i].archived = archived }
         }) { showToast(archived ? "已归档，可在归档中恢复" : "已恢复") }
     }
+    // Archives the chosen failed Keys and removes the chosen offline models in one
+    // save. Candidates are read again here, so anything that recovered stays.
+    @discardableResult func cleanUp(keys: Set<UUID>, models: Set<ModelCleanupItem>) -> Bool {
+        let keyIDs = keys.intersection(Set(cleanup.map(\.id)))
+        let removals = Dictionary(grouping: models.intersection(Set(modelCleanup)), by: \.credentialID).mapValues { Set($0.map(\.model)) }
+        guard !keyIDs.isEmpty || !removals.isEmpty else { return false }
+        let removed = removals.values.reduce(0) { $0 + $1.count }
+        let success = commit { next in
+            for i in next.credentials.indices {
+                let id = next.credentials[i].id
+                if keyIDs.contains(id) { next.credentials[i].archived = true }
+                else if let names = removals[id] { next.credentials[i].removeModels(names); next.credentials[i].updatedAt = Date() }
+            }
+        }
+        if success {
+            showToast([keyIDs.isEmpty ? nil : "已归档 \(keyIDs.count) 条 Key", removed == 0 ? nil : "已移除 \(removed) 个模型"].compactMap { $0 }.joined(separator: "，"))
+        }
+        return success
+    }
     func permanentlyDelete(_ record: Credential, expectedUpdatedAt: Date? = nil) {
         guard let current = credentials.first(where: { $0.id == record.id }) else { return }
         guard current.archived, expectedUpdatedAt == nil || current.updatedAt == expectedUpdatedAt else {
@@ -338,13 +410,14 @@ final class VaultStore: ObservableObject {
         }
     }
 
-    func verify(_ record: Credential, session: URLSession = APIClient.session, testModel: Bool = false) async {
+    // No session: model calls pick one by endpoint, so image models can wait longer.
+    func verify(_ record: Credential, session: URLSession? = nil, testModel: Bool = false) async {
         guard !checking.contains(record.id), !record.archived else { return }
         guard let current = credentials.first(where: { $0.id == record.id }), current.updatedAt == record.updatedAt, !current.archived else { error = "此条目已修改、归档或删除，请重新选择后验证。"; return }
         if testModel, let issue = modelIssue(configuredForUse(current).model, for: current) { error = issue; return }
         checking.insert(record.id); defer { checking.remove(record.id) }
         let snapshot = configuredForUse(current)
-        let result = await APIClient.verify(snapshot, session: session, testModel: testModel)
+        let result = testModel ? await APIClient.probe(snapshot, session: session) : await APIClient.verify(snapshot, session: session ?? APIClient.session)
         guard !Task.isCancelled else { return }
         commit { next in
             guard let i = next.credentials.firstIndex(where: { $0.id == record.id }), configuredForUse(next.credentials[i]).hasSameVerificationConfiguration(as: snapshot), !next.credentials[i].archived else { return }
@@ -352,6 +425,7 @@ final class VaultStore: ObservableObject {
             if testModel {
                 next.credentials[i].check = result
                 next.credentials[i].connectionCheck = nil
+                if !snapshot.model.trimmed.isEmpty { next.credentials[i].recordProbe(result, model: snapshot.model.trimmed, protocolKind: snapshot.inferenceKind) }
             } else {
                 next.credentials[i].connectionCheck = result
                 // A directory probe cannot undo a successful call to the current model.
@@ -373,19 +447,89 @@ final class VaultStore: ObservableObject {
             next.credentials[i].modelCatalog = ModelCatalog(models: result.models)
         }) { showToast(result.models.isEmpty ? "接口返回了空模型列表，可手动填写模型" : "已获取 \(result.models.count) 个模型（当前页）") }
     }
-    func verifyAll(session: URLSession = APIClient.session) {
+    // Models this Key would call when checking all models, current model first.
+    func probeTargets(_ record: Credential) -> [String] {
+        guard record.kind != .custom, !record.archived else { return [] }
+        let configured = configuredForUse(record)
+        // Same rule as modelIssue, with the secrets gathered once for long catalogs.
+        let secrets = rendering.allSecrets(credentials) + configured.secretValues
+        return Credential.modelChoices(current: configured.model, available: rendering.models(record)).filter { name in
+            name.rangeOfCharacter(from: .controlCharacters) == nil && !secrets.contains { name == $0 || ($0.count >= 8 && name.contains($0)) }
+        }
+    }
+    var batchPlan: BatchPlan {
+        active.reduce(into: BatchPlan()) { plan, record in plan.add(record, targets: probeTargets(record)) }
+    }
+    func probePlan(_ record: Credential) -> BatchPlan {
+        var plan = BatchPlan(); plan.add(record, targets: probeTargets(record)); return plan
+    }
+    // Calls every model in this Key's list one at a time, records each duration,
+    // and saves once at the end. A stop keeps the results already received.
+    func probeModels(_ record: Credential, session: URLSession? = nil, onResult: (() -> Void)? = nil) async {
+        guard !checking.contains(record.id) else { return }
+        guard let current = credentials.first(where: { $0.id == record.id }), current.updatedAt == record.updatedAt, !current.archived else { error = "此条目已修改、归档或删除，请重新选择后检查。"; return }
+        let targets = probeTargets(current)
+        guard !targets.isEmpty else { return }
+        let snapshot = configuredForUse(current)
+        checking.insert(record.id); modelProbeProgress[record.id] = ProbeProgress(done: 0, total: targets.count)
+        defer { checking.remove(record.id); modelProbeProgress[record.id] = nil }
+        var results: [(model: String, result: CheckResult, configuration: Credential)] = []
+        for name in targets {
+            guard !Task.isCancelled else { break }
+            let configuration = name == snapshot.model.trimmed ? snapshot : configuredForUse(current.probing(name))
+            let result = await APIClient.probe(configuration, session: session)
+            // A cancelled request says nothing about the model.
+            if Task.isCancelled && result.httpStatus == nil { break }
+            results.append((name, result, configuration))
+            modelProbeProgress[record.id]?.done = results.count; onResult?()
+        }
+        guard !results.isEmpty else { return }
+        commit { next in
+            // Results belong to this Key at this address; a rotated Key or a
+            // different service discards them, as a single verification does.
+            guard let i = next.credentials.firstIndex(where: { $0.id == record.id }), !next.credentials[i].archived, next.credentials[i].fingerprint == current.fingerprint else { return }
+            var value = next.credentials[i]
+            // Results only; protocol choices stay as the user set them.
+            for item in results { value.recordProbe(item.result, model: item.model, protocolKind: item.configuration.inferenceKind) }
+            if let own = results.first(where: { $0.model == snapshot.model.trimmed }), configuredForUse(value).hasSameVerificationConfiguration(as: snapshot) {
+                if value.modelCatalog == nil, !value.availableModels.isEmpty { value.modelCatalog = ModelCatalog(models: value.availableModels) }
+                value.check = own.result; value.connectionCheck = nil
+            }
+            next.credentials[i] = value
+        }
+    }
+    // Checks every active Key: model services call each listed model, others
+    // (and Keys without a model) keep the GET connection check.
+    func verifyAll(session: URLSession? = nil) {
         guard !batchRunning else { return }
         let ids = active.map(\.id)
-        batchRunning = true
+        let plan = Dictionary(uniqueKeysWithValues: active.map { ($0.id, probeTargets($0).count) })
+        batchCounts = BatchCounts(keys: ids.count, models: plan.values.reduce(0, +))
+        batchRunning = true; updateBatchProgress()
         batchTask = Task {
-            for (index, id) in ids.enumerated() {
-                guard !Task.isCancelled else { break }
-                guard let item = active.first(where: { $0.id == id }) else { continue }
-                batchProgress = "检查 \(index + 1) / \(ids.count)"
-                await verify(item, session: session)
+            await withTaskGroup(of: Void.self) { group in
+                var queue = ids[...]
+                func launch(_ group: inout TaskGroup<Void>) {
+                    guard !Task.isCancelled, let id = queue.popFirst() else { return }
+                    group.addTask { @MainActor [weak self] in
+                        guard let self else { return }
+                        // Read the Key when its turn comes, so edits made while waiting are used.
+                        if let item = self.active.first(where: { $0.id == id }) {
+                            if self.probeTargets(item).isEmpty { await self.verify(item, session: session) }
+                            else { await self.probeModels(item, session: session) { self.batchCounts.modelsDone += 1; self.updateBatchProgress() } }
+                        }
+                        self.batchCounts.keysDone += 1; self.updateBatchProgress()
+                    }
+                }
+                for _ in 0..<Self.batchKeyConcurrency { launch(&group) }
+                while await group.next() != nil { launch(&group) }
             }
             batchRunning = false; batchProgress = ""
         }
+    }
+    private func updateBatchProgress() {
+        let counts = batchCounts
+        batchProgress = "检查 \(counts.keysDone) / \(counts.keys)" + (counts.models > 0 ? " · 模型 \(min(counts.modelsDone, counts.models)) / \(counts.models)" : "")
     }
     func cancelBatch() { batchTask?.cancel() }
     func queryBalance(_ record: Credential, session: URLSession = APIClient.session) async {
@@ -440,7 +584,7 @@ final class VaultStore: ObservableObject {
                 self.revision = try disk.save(restored, replacing: revision, preservingOriginal: true)
                 data = restored; loadError = nil; selectedID = active.first?.id
                 synchronizeEnvironment()
-                history.retryLoading(); history.synchronize(Set(credentials.map(\.id))); configureHistory()
+                history.retryLoading(); history.synchronize(Set(credentials.map(\.id))); configureHistory(); applyNetworkSettings()
                 proxy.update(credentials); if automaticProxy { proxy.start() }; showToast("已从备份恢复，原保险库已保留")
                 return true
             } catch is VaultWriteConflict { refreshAfterConflict(); return false }

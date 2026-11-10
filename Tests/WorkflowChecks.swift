@@ -354,9 +354,15 @@ import AppKit
         defer { try? FileManager.default.removeItem(at:root) }
         do {
             let key = SymmetricKey(size:.bits256), store = VaultStore(disk:EncryptedVault(directory:root,keyProvider:{key}),automaticProxy:false)
-            var first = DeepChecks.record(), second = DeepChecks.record(); first.name = "First"; second.name = "Second"; second.apiKey = "sk-fixture-old-batch-key-123456789"
-            expectTrue(store.importRecords([first,second])); let order = store.active
+            // One more Key than run in parallel, so the last listed one waits for a free slot.
+            // Imports are listed newest first, so the first imported Key is checked last.
+            let count = VaultStore.batchKeyConcurrency + 1
+            let records = (0..<count).map { index -> Credential in
+                var value = DeepChecks.record(); value.name = "Batch \(index)"; value.apiKey = index == 0 ? "sk-fixture-old-batch-key-123456789" : "sk-fixture-batch-key-\(index)-123456789"; return value
+            }
+            expectTrue(store.importRecords(records)); let order = store.active
             let firstID = try unwrap(order.first?.id), later = try unwrap(order.last)
+            expectEqual(later.apiKey, "sk-fixture-old-batch-key-123456789")
             var sent:[String] = []
             let session = MockURLProtocol.session { request in
                 MockURLProtocol.lock.lock(); sent.append(request.value(forHTTPHeaderField:"Authorization") ?? ""); MockURLProtocol.lock.unlock()
@@ -364,10 +370,11 @@ import AppKit
             }
             defer { session.invalidateAndCancel() }
             store.verifyAll(session:session)
-            await InteractionFlowChecks.wait { store.checking.contains(firstID) }
+            await InteractionFlowChecks.wait { store.checking.count == VaultStore.batchKeyConcurrency }
+            expectTrue(store.checking.contains(firstID)); expectFalse(store.checking.contains(later.id))
             var updated = later; updated.apiKey = "sk-fixture-new-batch-key-987654321"; expectTrue(store.save(updated))
             for _ in 0..<100 { if !store.batchRunning { break }; try await Task.sleep(for:.milliseconds(15)) }
-            expectFalse(store.batchRunning); expectEqual(sent.count,2)
+            expectFalse(store.batchRunning); expectEqual(sent.count,count)
             expectFalse(sent.contains("Bearer "+later.apiKey)); expectTrue(sent.contains("Bearer "+updated.apiKey))
             expectEqual(store.credentials.first { $0.id == later.id }?.check?.state,.valid)
             checkpoint("Workflow.batch-verification-uses-current-credentials-for-keys-edited-while-waiting")

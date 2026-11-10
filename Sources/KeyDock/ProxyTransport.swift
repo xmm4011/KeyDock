@@ -4,7 +4,7 @@ import Security
 #endif
 
 struct ProxyTransportPolicy {
-    var idleTimeout: TimeInterval = 3600
+    var idleTimeout: TimeInterval = NetworkTimeouts.defaultProxy
     var resourceTimeout: TimeInterval = 86400
     var maximumConnectionsPerHost = 64
     var maximumClients = 256
@@ -39,8 +39,11 @@ final class ProxyUpstreamTransport: NSObject, URLSessionDataDelegate, @unchecked
     private var session: URLSession!
     private var invalidated = false, retiring = false
     let policy: ProxyTransportPolicy
+    // Applied per request on the proxy queue; a request's own timeout overrides
+    // the session default, so settings changes reach new calls without a new pool.
+    var idleTimeout: TimeInterval
     init(queue: DispatchQueue, policy: ProxyTransportPolicy) {
-        self.policy = policy; super.init()
+        self.policy = policy; idleTimeout = policy.idleTimeout; super.init()
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = policy.idleTimeout
         configuration.timeoutIntervalForResource = policy.resourceTimeout
@@ -51,7 +54,7 @@ final class ProxyUpstreamTransport: NSObject, URLSessionDataDelegate, @unchecked
     }
     func start(_ request: URLRequest, target: ProxyConnection) throws -> URLSessionDataTask {
         guard !invalidated && !retiring else { throw HTTPInputError(status: 503, message: "代理连接池正在关闭，请稍后重试。") }
-        var request = request; request.timeoutInterval = policy.idleTimeout
+        var request = request; request.timeoutInterval = idleTimeout
         let task = session.dataTask(with: request); targets[task.taskIdentifier] = Target(target); task.resume(); return task
     }
     func cancel(_ task: URLSessionTask?) { if let task { targets.removeValue(forKey: task.taskIdentifier); task.cancel() }; closeIfIdle() }

@@ -4,6 +4,8 @@ import AppKit
 
 @MainActor enum GlobalSettingsChecks {
     static func run() async {
+        await networkTimeoutSettings()
+        await proxyTimeoutChangesApplyToNewRequests()
         runCheck("Settings.defaults-hide-sensitive-values-without-recording-bodies-and-full-toggle-is-reversible") {
             try NewFeatureChecks.isolated { root in
                 let key = SymmetricKey(size: .bits256), board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
@@ -91,5 +93,61 @@ import AppKit
             expectTrue(store.history.entries[1].bodiesCaptured)
             checkpoint("Settings.real-proxy-switches-off-on-off-for-subsequent-requests-and-keeps-existing-evidence-and-usage")
         } catch { checkFailures.append(error.localizedDescription); checkpoint("Settings.real-proxy-capture-completes") }
+    }
+    private static func networkTimeoutSettings() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-Timeouts-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root); APIClient.verificationTimeout = NetworkTimeouts.defaultVerification }
+        do {
+            let key = SymmetricKey(size: .bits256), disk = EncryptedVault(directory: root, keyProvider: { key })
+            let store = VaultStore(disk: disk, automaticProxy: false)
+            expectEqual(store.verificationTimeout, 60); expectEqual(store.proxyTimeout, 3600)
+            expectEqual(APIClient.verificationTimeout, 60); expectEqual(APIClient.session.configuration.timeoutIntervalForResource, 60)
+            expectTrue(NetworkTimeouts.proxyChoices.allSatisfy { $0 >= 1800 && $0 <= ProxyTransportPolicy().resourceTimeout })
+            expectTrue(store.setVerificationTimeout(120)); expectTrue(store.setProxyTimeout(7200))
+            expectEqual(APIClient.verificationTimeout, 120)
+            expectEqual(APIClient.session.configuration.timeoutIntervalForRequest, 120); expectEqual(APIClient.session.configuration.timeoutIntervalForResource, 120)
+            expectTrue(APIClient.session === APIClient.session)
+            let storeIdle = await store.proxy.currentUpstreamIdleTimeout(); expectEqual(storeIdle, 7200)
+            expectFalse(store.setVerificationTimeout(5)); expectTrue(store.error != nil); store.error = nil
+            expectFalse(store.setProxyTimeout(60)); expectTrue(store.error != nil); store.error = nil
+            expectEqual(store.verificationTimeout, 120); expectEqual(store.proxyTimeout, 7200)
+            let reopened = VaultStore(disk: disk, automaticProxy: false)
+            expectEqual(reopened.verificationTimeout, 120); expectEqual(reopened.proxyTimeout, 7200)
+            let reopenedIdle = await reopened.proxy.currentUpstreamIdleTimeout(); expectEqual(reopenedIdle, 7200)
+            expectTrue(APIClient.failureMessage(URLError(.timedOut)).contains("2 分钟"))
+            expectTrue(APIClient.failureMessage(URLError(.timedOut)).contains("系统设置"))
+            var tampered = reopened.data; tampered.verificationTimeout = 1; tampered.proxyTimeout = 1
+            _ = try disk.save(tampered, replacing: try disk.revision())
+            let fallback = VaultStore(disk: disk, automaticProxy: false)
+            expectEqual(fallback.verificationTimeout, 60); expectEqual(fallback.proxyTimeout, 3600); expectEqual(APIClient.verificationTimeout, 60)
+            let old = try JSONDecoder().decode(VaultData.self, from: Data(#"{"version":1,"credentials":[]}"#.utf8))
+            expectNil(old.verificationTimeout); expectNil(old.proxyTimeout)
+            checkpoint("Settings.network-timeouts-default-persist-reject-unknown-values-and-drive-verification-and-proxy")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Settings.network-timeouts") }
+    }
+    private static func proxyTimeoutChangesApplyToNewRequests() async {
+        let server = FixtureServer { _ in FixtureResponse(chunks: [Data("slow".utf8)], headerDelay: 1.5) }
+        let proxy = LocalProxy(port: 0, policy: .init(idleTimeout: 30, resourceTimeout: 60))
+        let session = URLSession(configuration: .ephemeral)
+        defer { proxy.stop(); server.stop(); session.invalidateAndCancel() }
+        do {
+            try server.start(); await InteractionFlowChecks.wait { server.port != nil }
+            var record = DeepChecks.record(); record.baseURL = "http://127.0.0.1:\(try unwrap(server.port))/v1"
+            proxy.update([record]); proxy.start(); await InteractionFlowChecks.wait { proxy.running }
+            func request() throws -> URLRequest {
+                var r = URLRequest(url: URL(string: "http://127.0.0.1:\(try unwrap(proxy.listeningPort))/s/\(record.routeID)/slow")!)
+                r.setValue("Bearer " + record.localKey, forHTTPHeaderField: "Authorization"); r.httpMethod = "POST"; r.httpBody = Data("{}".utf8); return r
+            }
+            let patient = try await session.data(for: request())
+            expectEqual((patient.1 as? HTTPURLResponse)?.statusCode, 200); expectEqual(patient.0, Data("slow".utf8))
+            proxy.setUpstreamIdleTimeout(0.4)
+            let shortIdle = await proxy.currentUpstreamIdleTimeout(); expectEqual(shortIdle, 0.4)
+            let short = try await session.data(for: request())
+            expectEqual((short.1 as? HTTPURLResponse)?.statusCode, 504)
+            proxy.setUpstreamIdleTimeout(30)
+            let restored = try await session.data(for: request())
+            expectEqual((restored.1 as? HTTPURLResponse)?.statusCode, 200)
+            checkpoint("Settings.proxy-timeout-change-applies-to-new-requests-without-restarting-the-proxy")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Settings.proxy-timeout-runtime") }
     }
 }

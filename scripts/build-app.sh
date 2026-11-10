@@ -20,8 +20,8 @@ cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>local.keydock.app</string>
   <key>CFBundleExecutable</key><string>KeyDock</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>31</string>
-  <key>CFBundleShortVersionString</key><string>1.3.24</string>
+  <key>CFBundleVersion</key><string>35</string>
+  <key>CFBundleShortVersionString</key><string>1.3.28</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>

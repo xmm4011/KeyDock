@@ -13,6 +13,9 @@ struct CredentialDetail: View {
     @State private var showSource = false
     @State private var confirmArchive = false
     @State private var addingModel = false
+    @State private var confirmProbe = false
+    @State private var probePlan = BatchPlan()
+    @State private var showProbes = true
 
     init(record: Credential, initialTab: DetailTab = .use, edit: @escaping () -> Void) {
         self.record = record; self.edit = edit; _tab = State(initialValue: initialTab)
@@ -44,6 +47,10 @@ struct CredentialDetail: View {
             }.background(Palette.canvas.opacity(0.5)).id(tab)
         }
         .alert(isPresented: $confirmArchive) { CredentialConfirmation.archiveAlert { store.archive([record.id]) } }
+        .alert("检查此 Key 的全部模型？", isPresented: $confirmProbe) {
+            Button("开始检查") { Task { await store.probeModels(record) } }
+            Button("取消", role: .cancel) {}
+        } message: { Text("将依次向 \(probePlan.models) 个模型各发送一次简短请求，各产生少量用量，并记录每次耗时。" + probePlan.imageNote + "向量、图片模型分别通过向量和图片接口验证。") }
         .sheet(isPresented: $addingModel) { AddModelView(record: record) }
     }
 
@@ -104,31 +111,7 @@ struct CredentialDetail: View {
                         .disabled((record.archived || record.expired || record.connectionIssue != nil) && !store.installedEnvironmentIDs.contains(record.id))
                 }.buttonStyle(.bordered).buttonBorderShape(.roundedRectangle(radius: 6)).controlSize(.regular)
             }
-            SurfaceCard {
-                HStack {
-                    Text(record.kind == .custom ? "连接检查" : "调用验证").font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    if store.checking.contains(record.id) { ProgressView().controlSize(.mini) }
-                    Button(record.verificationActionTitle, systemImage: "arrow.clockwise") {
-                        Task { await store.verify(usageRecord, testModel: record.kind != .custom) }
-                    }.disabled(store.checking.contains(record.id) || modelCheckIssue != nil).controlSize(.regular)
-                        .help(modelCheckIssue ?? (record.kind == .custom ? "按配置的 GET 接口检查连接" : "向当前模型发送简短请求，会产生少量用量"))
-                }
-                if let issue = modelCheckIssue { Text(issue).font(.system(size: 11)).foregroundStyle(Palette.muted) }
-                if let check = record.check {
-                    Text(store.displayText(check.displayMessage))
-                        .font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(4).lineLimit(3).textSelection(.enabled)
-                    Text("上次" + check.actionTitle + " " + check.checkedAt.formatted(date: .abbreviated, time: .shortened)).font(.system(size: 11)).foregroundStyle(Palette.muted)
-                } else {
-                    Text(record.kind == .custom ? "按配置的 GET 接口检查连接。" : "向当前模型发送简短请求，会产生少量用量。")
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(3)
-                }
-                if let connection = recentConnectionCheck {
-                    Text(connection.state == .valid ? "最近连接检查正常，已保留上次模型调用结果。" : "最近连接检查未能确认可用性，已保留上次模型调用结果。")
-                        .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(3)
-                }
-                if record.check != nil { Divider().overlay(Palette.border.opacity(0.5)); checkDetails }
-            }
+            verificationCard
             SurfaceCard {
                 Text(record.kind == .custom ? "环境变量" : "环境变量与 curl").font(.system(size: 13, weight: .medium))
                     VStack(alignment: .leading, spacing: 20) {
@@ -164,11 +147,23 @@ struct CredentialDetail: View {
                 if let issue = APIClient.catalogIssue(record) { Text(issue) }
                 Button("复制模型列表") { store.copy(models.joined(separator: "\n")) }.disabled(models.isEmpty)
                 Button("添加模型…") { addingModel = true }
+                // Every listed model; hidden when nothing besides the model in use is left.
+                if models.contains(where: { $0 != usageRecord.model.trimmed }) {
+                    Menu("移除模型") {
+                        ForEach(models, id: \.self) { model in
+                            if model == usageRecord.model.trimmed {
+                                Button(store.displayText(model) + "（使用中）") {}.disabled(true)
+                            } else {
+                                Button(store.displayText(model)) { _ = store.removeModel(model, from: record) }
+                            }
+                        }
+                    }.disabled(record.archived)
+                }
                 if !models.isEmpty { Divider() }
                 if record.availableModels.isEmpty && !models.isEmpty { Text("当前已配置模型") }
                 if record.modelCatalog?.source == "资料" { Text("来自资料，调用权限需验证") }
                 ForEach(models, id: \.self) { model in
-                    Button(store.displayText(model)) { store.selectModel(model, for: record) }.disabled(store.modelIssue(model, for: usageRecord) != nil)
+                    Button(store.displayText(model) + probeSuffix(model)) { store.selectModel(model, for: record) }.disabled(store.modelIssue(model, for: usageRecord) != nil)
                 }
             }.lineLimit(1).frame(maxWidth: 200, alignment: .trailing).fixedSize(horizontal: true, vertical: false).help(usageRecord.model.isEmpty ? "选择用于生成请求的模型" : store.displayText(usageRecord.model))
             Menu(record.inferenceKind.protocolTitle) {
@@ -234,6 +229,112 @@ struct CredentialDetail: View {
             Text("创建于 \(record.createdAt.formatted(date: .abbreviated, time: .omitted)) · 更新于 \(record.updatedAt.formatted(date: .abbreviated, time: .shortened))")
                 .font(.system(size: 11)).foregroundStyle(Palette.muted)
         }
+    }
+    private var verificationCard: some View {
+        SurfaceCard {
+            verificationHeader
+            if let issue = modelCheckIssue { Text(issue).font(.system(size: 11)).foregroundStyle(Palette.muted) }
+            if let progress = store.modelProbeProgress[record.id] {
+                Text("正在检查模型 \(progress.done) / \(progress.total)…").font(.system(size: 11)).foregroundStyle(Palette.muted)
+            }
+            if let check = record.check {
+                Text(store.displayText(check.displayMessage))
+                    .font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(4).lineLimit(3).textSelection(.enabled)
+                Text(lastCheckLine(check)).font(.system(size: 11)).foregroundStyle(Palette.muted)
+            } else {
+                Text(record.kind == .custom ? "按配置的 GET 接口检查连接。" : "向当前模型发送简短请求，会产生少量用量。")
+                    .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(3)
+            }
+            if let connection = recentConnectionCheck {
+                Text(connection.state == .valid ? "最近连接检查正常，已保留上次模型调用结果。" : "最近连接检查未能确认可用性，已保留上次模型调用结果。")
+                    .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(3)
+            }
+            if record.kind != .custom, !probeRows.isEmpty { Divider().overlay(Palette.border.opacity(0.5)); modelProbeList }
+            if record.check != nil { Divider().overlay(Palette.border.opacity(0.5)); checkDetails }
+        }
+    }
+    private var verificationHeader: some View {
+        let busy = store.checking.contains(record.id)
+        return HStack {
+            Text(record.kind == .custom ? "连接检查" : "调用验证").font(.system(size: 13, weight: .semibold))
+            Spacer()
+            if busy { ProgressView().controlSize(.mini) }
+            if record.kind != .custom, store.rendering.models(usageRecord).count > 1 {
+                Button("检查全部模型") { probePlan = store.probePlan(record); confirmProbe = true }
+                    .disabled(busy || record.archived).controlSize(.regular)
+                    .help("依次调用列表中的每个模型，记录耗时并找出已下线的模型；各产生少量用量")
+            }
+            Button(record.verificationActionTitle, systemImage: "arrow.clockwise") {
+                Task { await store.verify(usageRecord, testModel: record.kind != .custom) }
+            }.disabled(busy || modelCheckIssue != nil).controlSize(.regular)
+                .help(modelCheckIssue ?? (record.kind == .custom ? "按配置的 GET 接口检查连接" : "向当前模型发送简短请求，会产生少量用量"))
+        }
+    }
+    private func lastCheckLine(_ check: CheckResult) -> String {
+        let time = "上次" + check.actionTitle + " " + check.checkedAt.formatted(date: .abbreviated, time: .shortened)
+        guard let duration = check.duration else { return time }
+        return time + " · 耗时 " + Latency.text(duration)
+    }
+    private func probeSuffix(_ model: String) -> String {
+        guard let probe = record.modelProbes?[model] else { return "" }
+        if probe.passed, let duration = probe.duration { return "  ·  " + Latency.text(duration) }
+        return "  ·  " + probe.title
+    }
+    // Checked models in this Key's list: passing ones fastest first, then failures.
+    private var probeRows: [(model: String, probe: ModelProbe)] {
+        let probes = record.modelProbes ?? [:]
+        return store.rendering.models(usageRecord).compactMap { name in probes[name].map { (name, $0) } }.sorted { left, right in
+            func rank(_ probe: ModelProbe) -> Int { probe.passed ? 0 : (probe.unavailable ? 2 : 1) }
+            if rank(left.probe) != rank(right.probe) { return rank(left.probe) < rank(right.probe) }
+            if left.probe.passed, let a = left.probe.duration, let b = right.probe.duration, a != b { return a < b }
+            return left.model < right.model
+        }
+    }
+    private var modelProbeList: some View {
+        let rows = probeRows, total = store.rendering.models(usageRecord).count
+        let fastest = record.fastestProbe(in: rows.map(\.model))
+        let latest = rows.map(\.probe.checkedAt).max()
+        return DisclosureGroup(isExpanded: $showProbes) {
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(rows, id: \.model) { row in probeRow(row.model, row.probe, fastest: row.model == fastest?.model) }
+                let failed = rows.filter { $0.probe.cleanable && $0.model != usageRecord.model.trimmed }.count
+                if total > rows.count || failed > 0 || latest != nil {
+                    Text([total > rows.count ? "另有 \(total - rows.count) 个模型尚未检查。" : nil,
+                          failed > 0 ? "已下线或未通过的模型可在右上角菜单「一键清理」中移除。" : nil,
+                          latest.map { "最近检查 " + $0.formatted(date: .abbreviated, time: .shortened) }].compactMap { $0 }.joined(separator: " "))
+                        .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(3).padding(.top, 2)
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text("模型耗时").font(.system(size: 12, weight: .medium))
+                Text("已检查 \(rows.count) / \(total)" + (fastest.map { " · 最快 " + store.displayText($0.model) + " " + Latency.text($0.probe.duration ?? 0) } ?? ""))
+                    .font(.system(size: 11)).foregroundStyle(Palette.muted).lineLimit(1).truncationMode(.middle)
+            }
+        }
+    }
+    private func probeRow(_ model: String, _ probe: ModelProbe, fastest: Bool) -> some View {
+        let color: Color = probe.passed ? Palette.teal : (probe.unavailable || probe.state == .invalid ? .red : .orange)
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Circle().fill(color).frame(width: 6, height: 6)
+                Text(store.displayText(model)).font(.system(size: 12, design: .monospaced)).lineLimit(1).truncationMode(.middle)
+                if let label = ModelEndpoint.of(model).label { tag(label, color: Palette.muted) }
+                if model == usageRecord.model.trimmed { tag("当前", color: Palette.accent) }
+                if fastest { tag("最快", color: Palette.teal) }
+                Spacer(minLength: 8)
+                Text(probe.title).font(.system(size: 11)).foregroundStyle(color)
+                Text(probe.duration.map(Latency.text) ?? "—").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).frame(width: 64, alignment: .trailing)
+            }
+            // Failures show why right away; the full reply stays in the tooltip.
+            if !probe.passed {
+                Text(store.displayText(probe.reason)).font(.system(size: 11)).foregroundStyle(Palette.muted)
+                    .lineLimit(2).truncationMode(.tail).padding(.leading, 14).textSelection(.enabled)
+            }
+        }.help(store.displayText(probe.message) + "\n" + probe.protocolKind.protocolTitle + " · " + probe.checkedAt.formatted(date: .abbreviated, time: .shortened))
+    }
+    private func tag(_ text: String, color: Color) -> some View {
+        Text(text).font(.system(size: 10, weight: .medium)).foregroundStyle(color).padding(.horizontal, 6).padding(.vertical, 2).background(color.opacity(0.09), in: Capsule())
     }
     private var checkDetails: some View {
         VStack(alignment: .leading, spacing: 14) {

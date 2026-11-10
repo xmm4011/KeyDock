@@ -56,6 +56,37 @@ import SwiftUI
                 expectNil(preset.manualModels)
             }
         }
+        runCheck("ManualModels.remove-drops-added-or-fetched-models-but-keeps-the-active-model") {
+            try NewFeatureChecks.isolated { root in
+                let key = SymmetricKey(size: .bits256), disk = EncryptedVault(directory: root, keyProvider: { key })
+                let store = VaultStore(disk: disk, automaticProxy: false)
+                var record = DeepChecks.record(); record.model = "fixture-a"; record.modelCatalog = ModelCatalog(models: ["catalog-a"])
+                expectTrue(store.importRecords([record]))
+                expectTrue(store.addModel("fixture-b", to: record)); expectTrue(store.addModel("fixture-c", to: record))
+                let before = try unwrap(store.selected)
+                expectEqual(before.model, "fixture-c"); expectTrue(before.modelProtocols?["fixture-b"] != nil)
+                expectFalse(store.removeModel("fixture-c", from: before)); expectTrue(store.error != nil); store.error = nil
+                expectTrue(store.removeModel("fixture-b", from: before))
+                let after = try unwrap(store.selected)
+                expectFalse(after.modelOptions.contains("fixture-b")); expectNil(after.modelProtocols?["fixture-b"])
+                expectEqual(after.model, "fixture-c"); expectTrue(after.modelOptions.contains("catalog-a")); expectTrue(after.modelOptions.contains("fixture-a"))
+                expectFalse(try unwrap(try disk.load().credentials.first).modelOptions.contains("fixture-b"))
+                expectTrue(store.removeModel("not-added", from: after))
+                var rotated = after; rotated.apiKey = "fixture-rotated-remove-key"
+                expectFalse(store.removeModel("fixture-a", from: rotated)); expectTrue(store.error != nil); store.error = nil
+                expectTrue(store.removeModel("fixture-a", from: after)); expectTrue(store.removeModel("fixture-b", from: after))
+                expectEqual(store.selected?.manualModels, ["fixture-c"])
+                // A model fetched from the service can be removed as well, with its timing.
+                var listed = try unwrap(store.selected)
+                expectTrue(store.commit { next in next.credentials[0].modelProbes = ["catalog-a": ModelProbe(CheckResult(state: .valid, message: "ok", httpStatus: 200, duration: 0.2), model: "catalog-a", protocolKind: .compatible)] })
+                listed = try unwrap(store.selected)
+                expectTrue(store.removeModel("catalog-a", from: listed))
+                let trimmed = try unwrap(store.selected)
+                expectFalse(trimmed.modelOptions.contains("catalog-a")); expectEqual(trimmed.modelCatalog?.models, [])
+                expectNil(trimmed.modelProbes?["catalog-a"]); expectEqual(trimmed.model, "fixture-c")
+                expectFalse(try unwrap(try disk.load().credentials.first).modelOptions.contains("catalog-a"))
+            }
+        }
         runCheck("ManualModels.organizer-choice-is-remembered-without-replacing-the-project-default") {
             try NewFeatureChecks.isolated { root in
                 let key = SymmetricKey(size: .bits256), store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false)

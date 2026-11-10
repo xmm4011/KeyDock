@@ -94,7 +94,8 @@ final class LocalProxy: ObservableObject, @unchecked Sendable {
     private var startRequested = false
     let policy: ProxyTransportPolicy
     let port: UInt16
-    init(port: UInt16 = 47831, policy: ProxyTransportPolicy = .init()) { self.port = port; self.policy = policy }
+    private var upstreamIdleTimeout: TimeInterval
+    init(port: UInt16 = 47831, policy: ProxyTransportPolicy = .init()) { self.port = port; self.policy = policy; upstreamIdleTimeout = policy.idleTimeout }
     deinit {
         listener?.stateUpdateHandler = nil; listener?.cancel()
         retiringListeners.values.forEach { $0.stateUpdateHandler = nil; $0.cancel() }
@@ -103,6 +104,13 @@ final class LocalProxy: ObservableObject, @unchecked Sendable {
     }
 
     func update(_ records: [Credential]) { queue.async { self.records = records } }
+    // New upstream requests use the latest value; requests already in flight keep theirs.
+    func setUpstreamIdleTimeout(_ value: TimeInterval) {
+        queue.async { self.upstreamIdleTimeout = value; self.transport?.idleTimeout = value }
+    }
+    func currentUpstreamIdleTimeout() async -> TimeInterval {
+        await withCheckedContinuation { continuation in queue.async { continuation.resume(returning: self.upstreamIdleTimeout) } }
+    }
     func recordHistory(captureBodies: Set<UUID>, recorder: @escaping (ProxyLogEntry) -> Void) {
         queue.async { self.captureBodies = captureBodies; self.recorder = recorder }
     }
@@ -126,7 +134,7 @@ final class LocalProxy: ObservableObject, @unchecked Sendable {
                 (parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
                 parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: self.port)!)
                 let listener = try NWListener(using: parameters)
-                let transport = ProxyUpstreamTransport(queue: self.queue, policy: self.policy); self.transport = transport
+                let transport = ProxyUpstreamTransport(queue: self.queue, policy: self.policy); transport.idleTimeout = self.upstreamIdleTimeout; self.transport = transport
                 let budget = ProxyRequestBudget(limit: self.policy.maximumBufferedRequestBytes)
                 self.listener = listener
                 listener.stateUpdateHandler = { [weak self] state in
