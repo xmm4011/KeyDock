@@ -9,6 +9,8 @@ final class AgentWorker: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
     private var closed = false
+    // Access only on writes, including closure of the input handle.
+    private var inputClosed = false
     private var diagnosticBytes = Data()
     var diagnostics: String { lock.lock(); defer { lock.unlock() }; return String(decoding: diagnosticBytes, as: UTF8.self) }
     private let continuation: AsyncThrowingStream<Data, Error>.Continuation
@@ -35,9 +37,9 @@ final class AgentWorker: @unchecked Sendable {
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let bytes = handle.availableData
             if bytes.isEmpty { handle.readabilityHandler = nil }
-#if KEYDOCK_CHECKS
             if let self { self.lock.lock(); self.diagnosticBytes.append(bytes.prefix(max(0, 32768 - self.diagnosticBytes.count))); self.lock.unlock() }
-#endif
+            if !bytes.isEmpty, let self,
+               let event = try? JSONSerialization.data(withJSONObject: ["type":"runtime_diagnostic", "message":String(decoding: bytes.prefix(8192), as: UTF8.self)]) { self.continuation.yield(event) }
         }
         do { try process.run() } catch {
             output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil
@@ -61,13 +63,17 @@ final class AgentWorker: @unchecked Sendable {
         let data = try JSONSerialization.data(withJSONObject: value, options: [.withoutEscapingSlashes]) + Data([10])
         try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, Error>) in
             writes.async {
+                guard !self.inputClosed else { result.resume(throwing: KeyDockError.message("Agent 连接已结束。")); return }
                 do { try self.input.fileHandleForWriting.write(contentsOf: data); result.resume() }
                 catch { result.resume(throwing: KeyDockError.message("Agent 连接已结束。")) }
             }
         }
     }
     func requestCancel() {
-        writes.async { try? self.input.fileHandleForWriting.write(contentsOf: Data("{\"type\":\"cancel\"}\n".utf8)) }
+        writes.async {
+            guard !self.inputClosed else { return }
+            try? self.input.fileHandleForWriting.write(contentsOf: Data("{\"type\":\"cancel\"}\n".utf8))
+        }
         if process.isRunning { process.terminate() }
     }
     func shutdown() async {
@@ -89,7 +95,14 @@ final class AgentWorker: @unchecked Sendable {
             }
         }
         output.fileHandleForReading.readabilityHandler = nil; errors.fileHandleForReading.readabilityHandler = nil
-        try? input.fileHandleForWriting.close(); try? output.fileHandleForReading.close(); try? errors.fileHandleForReading.close()
+        await withCheckedContinuation { (result: CheckedContinuation<Void, Never>) in
+            writes.async {
+                if !self.inputClosed { self.inputClosed = true; try? self.input.fileHandleForWriting.close() }
+                result.resume()
+            }
+        }
+        // Read handles close with their owning objects after in-flight
+        // readability callbacks release them, rather than during a callback.
         closeEvents()
     }
     private func closeEvents() { lock.lock(); defer { lock.unlock() }; if !closed { closed = true; continuation.finish() } }

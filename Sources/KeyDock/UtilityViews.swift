@@ -79,10 +79,14 @@ struct BackupView: View {
             let snapshot = store.data, pass = password
             operation = Task {
                 do {
-                    let data = try await Task.detached { try PortableBackup.create(snapshot, password: pass) }.value
+                    let worker = Task.detached {
+                        let data = try PortableBackup.create(snapshot, password: pass)
+                        try Task.checkCancellation()
+                        try data.write(to: url, options: .atomic)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                    }
+                    try await withTaskCancellationHandler(operation: { try await worker.value }, onCancel: { worker.cancel() })
                     try Task.checkCancellation()
-                    try data.write(to: url, options: .atomic)
-                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
                     store.showToast("加密备份已保存"); dismiss()
                 } catch { if !Task.isCancelled { self.error = error.localizedDescription } }
                 busy = false

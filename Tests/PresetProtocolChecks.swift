@@ -129,7 +129,7 @@ import CryptoKit
         }
         runCheck("Presets.agent-notes-are-structured-deduplicated-and-separate-from-original") {
             let notes = ImportAgentHost.structuredNotes(["access": ["使用区域专属 Key。", "使用区域专属 Key。", ""], "limits": ["仅供开发环境使用。"], "pending": ["请确认部署 ID。"]])
-            expectEqual(notes, "【接入要点】\n• 使用区域专属 Key。\n\n【使用限制】\n• 仅供开发环境使用。\n\n【待确认】\n• 请确认部署 ID。")
+            expectEqual(notes, "使用区域专属 Key。\n仅供开发环境使用。\n待确认：请确认部署 ID。")
             try NewFeatureChecks.isolated { root in
                 let raw = "DeepSeek API Key: sk-fixture-notes-secret-123456\n原始聊天很零散，这些全部只留在导入原文。"
                 let session = MockURLProtocol.session { _ in MockReply() }; defer { session.invalidateAndCancel() }
@@ -138,7 +138,7 @@ import CryptoKit
                                       "notes_sections": ["access": ["用于开发环境联调。"], "pending": ["核对部署 ID。"]]])
                 let record = try unwrap(host.reviewResult().records.first)
                 expectEqual(record.source, raw); expectFalse(record.notes.contains("原始聊天")); expectFalse(record.notes.contains(record.apiKey))
-                expectTrue(record.notes.contains("接入要点")); expectTrue(record.notes.contains("核对部署 ID")); expectFalse(record.notes.contains("使用限制"))
+                expectEqual(record.notes, "用于开发环境联调。\n待确认：核对部署 ID。")
             }
         }
         runCheck("Presets.same-provider-key-does-not-import-twice-for-different-protocols") {

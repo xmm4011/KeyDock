@@ -5,13 +5,23 @@ import UniformTypeIdentifiers
 import Vision
 import CryptoKit
 
-struct ImportImage: Identifiable, Sendable {
+struct ImportImage: Identifiable, Sendable, Codable, Equatable {
     let id: UUID
     let name: String
     let data: Data
     let mimeType: String
     let fingerprint: Data
-    var preview: NSImage? { NSImage(data: data) }
+    var preview: NSImage? { ImagePreviewCache.image(self, size: 2560) }
+    var thumbnail: NSImage? { ImagePreviewCache.image(self, size: 640) }
+    private enum CodingKeys: String, CodingKey { case id, name, data }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(restoring: values.decode(UUID.self, forKey: .id), name: values.decode(String.self, forKey: .name), normalizedJPEG: values.decode(Data.self, forKey: .data))
+    }
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id); try values.encode(name, forKey: .name); try values.encode(data, forKey: .data)
+    }
     init(restoring id: UUID, name: String, normalizedJPEG: Data) throws {
         guard normalizedJPEG.count <= 5 * 1024 * 1024, name.utf8.count <= 2048,
               let source = CGImageSourceCreateWithData(normalizedJPEG as CFData, nil),
@@ -61,6 +71,22 @@ struct ImportImage: Identifiable, Sendable {
     }
 }
 
+enum ImagePreviewCache {
+    private static let cache: NSCache<NSString, CGImage> = { let value = NSCache<NSString, CGImage>(); value.countLimit = 48; value.totalCostLimit = 64 * 1024 * 1024; return value }()
+    static func image(_ image: ImportImage, size: Int) -> NSImage? {
+        let key = (image.fingerprint.base64EncodedString() + ":" + String(size)) as NSString
+        let pixels: CGImage
+        if let value = cache.object(forKey: key) { pixels = value }
+        else {
+            guard let source = CGImageSourceCreateWithData(image.data as CFData, nil), let value = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true, kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: size] as CFDictionary) else { return nil }
+            pixels = value; cache.setObject(value, forKey: key, cost: value.bytesPerRow * value.height)
+        }
+        // Views and attachment cells may resize their own wrapper. Never share
+        // a mutable NSImage between a thumbnail and the full-size preview.
+        return NSImage(cgImage: pixels, size: NSSize(width: pixels.width, height: pixels.height))
+    }
+}
+
 struct ImportPaste {
     var text = ""
     var images: [ImportImage] = []
@@ -88,9 +114,10 @@ struct ImportPaste {
             let value = line.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             let url = value.hasPrefix("file://") ? URL(string: value) : (value.hasPrefix("/") ? URL(fileURLWithPath: value) : nil)
             if let url, url.isFileURL, ImportImage.isImagePath(url.path) {
+                guard images.count < 6 else { kept.append(line); errors.append("一次最多添加 6 张图片；超出部分未读取。"); continue }
                 do {
                     let image = try ImportImage.fromFile(url)
-                    if !images.contains(where: { $0.fingerprint == image.fingerprint }) { images.append(image) }
+                    if !images.contains(where: { $0.fingerprint == image.fingerprint }) { try ImportImage.validate(images + [image]); images.append(image) }
                 } catch { kept.append(line); errors.append("有图片路径无法读取，请重新粘贴图片或点击“添加图片”。") }
             } else { kept.append(line) }
         }

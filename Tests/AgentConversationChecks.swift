@@ -64,13 +64,15 @@ private final class ConversationFixture: @unchecked Sendable {
     static func scenario(_ mode:String) async {
         let fixture = ConversationFixture(mode == "cancel" ? "ask" : mode)
         let server = FixtureServer(response:fixture.response)
+        let promptDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-ConversationPrompts-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: promptDirectory) }
         do {
             try server.start(); defer { server.stop() }
             await InteractionFlowChecks.wait { server.port != nil }
             fixture.base = "http://127.0.0.1:\(try unwrap(server.port))"
             var service = DeepChecks.record(); service.baseURL = fixture.base+"/organizer/v1"; service.apiKey = "fixture-organizer-only"
             let interaction = AgentInteraction(); var saved: [ImportPaste] = []
-            let task = Task { try await ImportAgent.run(raw:"API Key: \(fixture.key)\nBase URL: \(fixture.base)/v1",service:service,model:"fixture",images:[],interaction:interaction,onSupplement:{saved.append($0)},progress:{_ in}) }
+            let task = Task { try await ImportAgent.run(raw:"API Key: \(fixture.key)\nBase URL: \(fixture.base)/v1",service:service,model:"fixture",images:[],promptConfiguration:.init(directory:promptDirectory),interaction:interaction,onSupplement:{saved.append($0)},progress:{_ in}) }
             if mode == "crash" {
                 do { _ = try await task.value; checkFailures.append("killed worker returned success") } catch {
                     expectTrue(interaction.failure != nil)

@@ -18,7 +18,9 @@ struct CredentialDetail: View {
         self.record = record; self.edit = edit; _tab = State(initialValue: initialTab)
     }
     var usageRecord: Credential { store.configuredForUse(record) }
-    private var modelCheckIssue: String? { usageRecord.connectionIssue ?? store.modelIssue(usageRecord.model, for: usageRecord) }
+    private var modelCheckIssue: String? {
+        (record.kind == .custom ? nil : usageRecord.connectionIssue ?? store.modelIssue(usageRecord.model, for: usageRecord)) ?? APIClient.verificationIssue(usageRecord, testModel: record.kind != .custom)
+    }
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -109,9 +111,10 @@ struct CredentialDetail: View {
                     if store.checking.contains(record.id) { ProgressView().controlSize(.mini) }
                     Button(record.verificationActionTitle, systemImage: "arrow.clockwise") {
                         Task { await store.verify(usageRecord, testModel: record.kind != .custom) }
-                    }.disabled(store.checking.contains(record.id) || record.archived || (record.kind != .custom && modelCheckIssue != nil)).controlSize(.regular)
-                        .help(record.kind == .custom ? "按配置的 GET 接口检查连接" : (modelCheckIssue ?? "向当前模型发送简短请求，会产生少量用量"))
+                    }.disabled(store.checking.contains(record.id) || modelCheckIssue != nil).controlSize(.regular)
+                        .help(modelCheckIssue ?? (record.kind == .custom ? "按配置的 GET 接口检查连接" : "向当前模型发送简短请求，会产生少量用量"))
                 }
+                if let issue = modelCheckIssue { Text(issue).font(.system(size: 11)).foregroundStyle(Palette.muted) }
                 if let check = record.check {
                     Text(store.displayText(check.displayMessage))
                         .font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(4).lineLimit(3).textSelection(.enabled)
@@ -152,12 +155,13 @@ struct CredentialDetail: View {
         }
     }
     private var modelSelector: some View {
-        let models = usageRecord.modelOptions
+        let models = store.rendering.models(usageRecord)
         return HStack(spacing: 12) {
             Spacer(minLength: 0)
             Text("调用模型").font(.system(size: 12)).foregroundStyle(Palette.muted)
             Menu(store.modelsChecking.contains(record.id) ? "正在获取模型…" : (usageRecord.model.trimmed.isEmpty ? "选择模型" : store.displayText(usageRecord.model))) {
-                Button(record.availableModels.isEmpty ? "获取模型列表" : "刷新模型列表") { Task { await store.fetchModels(record) } }.disabled(store.modelsChecking.contains(record.id) || record.archived)
+                Button(record.availableModels.isEmpty ? "获取模型列表" : "刷新模型列表") { Task { await store.fetchModels(record) } }.disabled(store.modelsChecking.contains(record.id) || APIClient.catalogIssue(record) != nil).help(APIClient.catalogIssue(record) ?? "读取当前 Key 的模型目录")
+                if let issue = APIClient.catalogIssue(record) { Text(issue) }
                 Button("复制模型列表") { store.copy(models.joined(separator: "\n")) }.disabled(models.isEmpty)
                 Button("添加模型…") { addingModel = true }
                 if !models.isEmpty { Divider() }
@@ -215,14 +219,13 @@ struct CredentialDetail: View {
                     Spacer()
                     if let preset = ProviderPreset.matching(record.baseURL), preset.balanceURL == nil, record.balanceURL.isEmpty {
                         Link("前往控制台", destination: URL(string: preset.console)!).controlSize(.regular)
-                    } else {
+                    }
                     Button { Task { await store.queryBalance(record) } } label: {
                         HStack { if store.balanceChecking.contains(record.id) { ProgressView().controlSize(.mini) }; Text("查询余额") }
-                    }.disabled(store.balanceChecking.contains(record.id)).controlSize(.regular)
-                    }
+                    }.disabled(store.balanceChecking.contains(record.id) || APIClient.balanceIssue(record) != nil).help(APIClient.balanceIssue(record) ?? "查询当前账户余额").controlSize(.regular)
                 }
                 if !record.balanceSummary.isEmpty { Text(store.displayText(record.balanceSummary)).font(.system(size: 22, weight: .semibold, design: .rounded)).textSelection(.enabled) }
-                Text(record.balanceCheckedAt.map { "更新于 " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ProviderPreset.matching(record.baseURL)?.balanceNote ?? "按需查询，部分服务支持。自定义接口可在编辑的高级选项中填写。")
+                Text(APIClient.balanceIssue(record) ?? record.balanceCheckedAt.map { "更新于 " + $0.formatted(date: .abbreviated, time: .shortened) } ?? ProviderPreset.matching(record.baseURL)?.balanceNote ?? "按需查询账户余额。")
                     .font(.system(size: 11)).foregroundStyle(Palette.muted).lineSpacing(4)
             }
             SurfaceCard {
@@ -261,10 +264,7 @@ struct CredentialDetail: View {
         guard let request, request.url?.absoluteString == check.endpoint else { return nil }
         return CheckedRequest(request)
     }
-    private var source: some View {
-        let raw = record.source.isEmpty ? record.curl : record.source
-        return CodePanel(text: raw.isEmpty ? "此条记录为手动创建，没有导入原文。" : (store.showFullContent ? raw : store.displayText(RedactedImport(raw).text)))
-    }
+    private var source: some View { CredentialSourceView(record: record) }
     private func info(_ label: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(label).font(.system(size: 12)).foregroundStyle(Palette.muted)

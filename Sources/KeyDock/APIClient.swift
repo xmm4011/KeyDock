@@ -18,13 +18,31 @@ struct APIClient {
         return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
     }()
 
+    static func failureMessage(_ error: Error) -> String {
+        if let error = error as? KeyDockError { return error.localizedDescription }
+        let ns = error as NSError
+        if error is CancellationError || (ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled) { return "请求已取消。" }
+        let reason: String
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorAppTransportSecurityRequiresSecureConnection:
+                reason = "macOS App Transport Security 阻止了 HTTP 请求。这是应用网络配置问题，请更新 KeyDock；无需更换密钥、模型或改成 HTTPS。"
+            case NSURLErrorTimedOut: reason = "请求超时，请检查服务响应与网络连接。"
+            case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed: reason = "无法解析服务地址，请检查域名与 DNS。"
+            case NSURLErrorCannotConnectToHost: reason = "无法连接服务，请检查地址、端口与网络。"
+            case NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost: reason = "网络连接不可用或已中断。"
+            default: reason = ns.localizedDescription
+            }
+        } else { reason = ns.localizedDescription }
+        return reason + "（\(ns.domain) \(ns.code)）"
+    }
+
     static func safeURL(_ raw: String) throws -> URL {
         guard let url = URL(string: raw.trimmed), let host = url.host, !host.isEmpty, url.user == nil, url.password == nil, url.fragment == nil else {
             throw KeyDockError.message("请填写完整地址，例如 https://api.example.com/v1。")
         }
-        let local = ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host)
-        guard url.scheme == "https" || (url.scheme == "http" && local) else {
-            throw KeyDockError.message("为保护密钥，只支持 HTTPS；本机 localhost 可使用 HTTP。")
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
+            throw KeyDockError.message("接口地址只支持 HTTP 或 HTTPS。")
         }
         return url
     }
@@ -106,6 +124,7 @@ struct APIClient {
 
     // Catalog discovery is independent of inference verification and its saved template.
     static func fetchModels(_ record: Credential, session: URLSession = APIClient.session) async -> CheckResult {
+        var attempted: URLRequest?
         do {
             var record = ProviderPreset.configuration(record)
             guard record.kind != .custom else { throw KeyDockError.message("此服务没有通用模型列表。") }
@@ -117,10 +136,12 @@ struct APIClient {
                 url = try safeURL(catalog); record.auth = .bearer
             } else { url = try endpoint(base: record.baseURL, suffix: "models", defaultVersion: record.kind == .gemini ? "v1beta" : "v1") }
             let request = try authenticatedRequest(url: url, record: record)
+            attempted = request
             let (data, response) = try await AgentVerification.boundedData(for: request, session: session, limit: 1_048_576)
             var catalogRecord = record; catalogRecord.verificationURL = ""; catalogRecord.callTemplate = nil
             var result = classify(status: response.statusCode, data: data, record: catalogRecord, endpoint: url.absoluteString)
             result.requestMethod = "GET"
+            result.request = CheckedRequest(request); result.response = CheckedResponse(data, response: response, record: record)
             if [404, 405].contains(response.statusCode), let preset = ProviderPreset.matching(record.baseURL) {
                 result.message = "当前接口未提供模型目录。" + preset.catalogNote + " 可在模型下拉框中添加模型。"
                 result = includingServiceError(result, data: data, record: record)
@@ -146,7 +167,7 @@ struct APIClient {
             result.models = Array(Set(result.models.filter { name in !name.trimmed.isEmpty && !record.secretValues.contains(where: { name.contains($0) }) })).sorted()
             return result
         } catch {
-            return CheckResult(state: .uncertain, message: (error as? KeyDockError)?.localizedDescription ?? "模型列表读取未完成，请检查连接后重试。")
+            return CheckResult(state: .uncertain, message: LogRedaction.text(failureMessage(error), secret: record.apiKey, otherSecrets: record.secretValues), endpoint: attempted?.url?.absoluteString ?? "", requestMethod: attempted?.httpMethod, request: attempted.map(CheckedRequest.init))
         }
     }
 
@@ -227,7 +248,7 @@ struct APIClient {
             result.response = CheckedResponse(data, response: http, record: record)
             result.requestMethod = request.httpMethod; result.request = CheckedRequest(request); return result
         } catch {
-            let message = (error as? KeyDockError)?.localizedDescription ?? "网络请求未完成。请检查地址、网络或代理设置后重试。"
+            let message = LogRedaction.text(failureMessage(error), secret: record.apiKey, otherSecrets: record.secretValues)
             return CheckResult(state: .uncertain, message: message, endpoint: attempted?.url?.absoluteString ?? "", requestMethod: attempted?.httpMethod, request: attempted.map(CheckedRequest.init))
         }
     }

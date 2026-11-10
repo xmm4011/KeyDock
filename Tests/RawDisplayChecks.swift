@@ -48,7 +48,8 @@ import CryptoKit
                 var entry = ProxyLogEntry(credentialID: record.id, method: "POST", requestURL: record.baseURL)
                 entry.bodiesCaptured = true; entry.requestHeaders = "Authorization: Bearer " + record.apiKey; entry.responseBody = response.body
                 history.append(entry); history.flush()
-                expectEqual(ProxyHistory(directory: root, keyProvider: { key }).entries.first?.requestHeaders, entry.requestHeaders)
+                let reloaded = ProxyHistory(directory: root, keyProvider: { key })
+                expectEqual(try reloaded.detail(for: unwrap(reloaded.entries.first)).requestHeaders, entry.requestHeaders)
                 expectEqual(try disk.load().credentials.first?.check?.response, response)
                 for name in ["vault.kdv", "history.kdv"] { expectFalse(String(decoding: try Data(contentsOf: root.appendingPathComponent(name)), as: UTF8.self).contains(record.apiKey)) }
                 let old = #"{"headers":"Authorization: [已隐藏]","body":"old [已隐藏]","truncated":false}"#

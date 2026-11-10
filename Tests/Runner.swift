@@ -1,9 +1,17 @@
 import Foundation
 import CryptoKit
+import AppKit
 
 @main
 enum CheckRunner {
-    @MainActor static func main() async {
+    @MainActor static func main() {
+        // Async UI work needs AppKit's event loop. Swift async-main's queue
+        // drain may interpret an AppKit run-loop stop as process completion.
+        Task { @MainActor in await run(); exit(0) }
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        NSApplication.shared.run()
+    }
+    @MainActor static func run() async {
         setbuf(stdout, nil)
         if let index = CommandLine.arguments.firstIndex(of: "--snapshot-directory"), CommandLine.arguments.indices.contains(index + 1) { LayoutChecks.outputDirectory = URL(fileURLWithPath: CommandLine.arguments[index + 1]) }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--instance-lock-hold" {
@@ -19,7 +27,52 @@ enum CheckRunner {
             } catch { exit(43) }
         }
         if CommandLine.arguments.contains("--live-deepseek") { await LiveChecks.run(); return }
+        if CommandLine.arguments.contains("--live-http-gateway") { await HTTPGatewayChecks.run(); return }
         if CommandLine.arguments.contains("--sdk-fixture") { await SDKFixture.run(); return }
+        if CommandLine.arguments.contains("--global-performance-checks") {
+            await GlobalPerformanceChecks.run()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL GLOBAL PERFORMANCE CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--body-performance-checks") || CommandLine.arguments.contains("--body-baseline-checks") {
+            if CommandLine.arguments.contains("--body-baseline-checks") { LargeBodyChecks.baseline() }
+            else { await LargeBodyChecks.run(); await LayoutChecks.historyDetails() }
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL BODY PERFORMANCE CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--end-to-end-audit-checks") {
+            await EndToEndAuditChecks.run()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL END TO END AUDIT CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--proxy-long-wait-checks") {
+            await HistoryScaleChecks.longRequests()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL PROXY LONG WAIT CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--history-ui-checks") {
+            await LayoutChecks.historyDetails()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL HISTORY UI CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--history-scale-checks") {
+            await HistoryScaleChecks.run()
+            await LayoutChecks.historyDetails()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL HISTORY SCALE CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--agent-prompt-checks") {
+            await AgentPromptChecks.run()
+            LayoutChecks.promptEditor()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL AGENT PROMPT CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
+        if CommandLine.arguments.contains("--agent-task-checks") {
+            await AgentTaskChecks.run()
+            await AgentTaskRuntimeChecks.run()
+            if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
+            print("ALL AGENT TASK CHECKS PASSED (\(checkCount) scenarios)"); return
+        }
         if CommandLine.arguments.contains("--raw-display-checks") {
             RawDisplayChecks.run()
             await GlobalSettingsChecks.run()
@@ -40,6 +93,7 @@ enum CheckRunner {
         }
         if CommandLine.arguments.contains("--capability-audit-checks") {
             await CapabilityAuditChecks.run()
+            await LayoutChecks.historyDetails()
             LayoutChecks.audit()
             if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
             print("ALL CAPABILITY AUDIT CHECKS PASSED (\(checkCount) scenarios)"); return
@@ -94,6 +148,7 @@ enum CheckRunner {
             if let index = CommandLine.arguments.firstIndex(of: "--snapshot-directory"), CommandLine.arguments.indices.contains(index + 1) {
                 LayoutChecks.outputDirectory = URL(fileURLWithPath: CommandLine.arguments[index + 1])
             }
+            await LayoutChecks.historyDetails()
             LayoutChecks.run()
             if !checkFailures.isEmpty { checkFailures.forEach { print("FAIL " + $0) }; exit(1) }
             print("ALL LAYOUT CHECKS PASSED (\(checkCount) scenarios)"); return
@@ -136,7 +191,7 @@ enum CheckRunner {
             ("ParserTests.testProviderAndExpiry", { ParserTests().testProviderAndExpiry() }),
             ("RequestTests.testEndpointPreservesGatewayPrefix", { try RequestTests().testEndpointPreservesGatewayPrefix() }),
             ("RequestTests.testDefaultVersionAndGemini", { try RequestTests().testDefaultVersionAndGemini() }),
-            ("RequestTests.testRejectsInsecureRemoteAndHeaderInjection", { RequestTests().testRejectsInsecureRemoteAndHeaderInjection() }),
+            ("RequestTests.testRejectsUnsupportedSchemesAndHeaderInjection", { RequestTests().testRejectsUnsupportedSchemesAndHeaderInjection() }),
             ("RequestTests.testQueryURLMustBeExplicitCustomVerification", { try RequestTests().testQueryURLMustBeExplicitCustomVerification() }),
             ("RequestTests.testStatusNeverConfusesNetworkQuotaOrPermissionsWithInvalidKey", { RequestTests().testStatusNeverConfusesNetworkQuotaOrPermissionsWithInvalidKey() }),
             ("RequestTests.testSafeConfigurationHasNoRealSecretAndDifferentAliases", { RequestTests().testSafeConfigurationHasNoRealSecretAndDifferentAliases() }),
@@ -146,7 +201,7 @@ enum CheckRunner {
             ("ProxyTests.testAliasMapsToExactKeyAndPreservesPathBodyQuery", { try ProxyTests().testAliasMapsToExactKeyAndPreservesPathBodyQuery() }),
             ("ProxyTests.testMultipleKeysOnOneVendorRouteSeparately", { try ProxyTests().testMultipleKeysOnOneVendorRouteSeparately() }),
             ("ProxyTests.testBrowserArchivedExpiredTraversalAndUnknownAliasesAreDenied", { ProxyTests().testBrowserArchivedExpiredTraversalAndUnknownAliasesAreDenied() }),
-            ("ProxyTests.testHTTPFramingAndChunkedUploadRejection", { try ProxyTests().testHTTPFramingAndChunkedUploadRejection() }),
+            ("ProxyTests.testHTTPFramingAndChunkedUploads", { try ProxyTests().testHTTPFramingAndChunkedUploads() }),
         ]
         for (name, run) in suites {
             do { try run() } catch { checkFailures.append(name + ": " + error.localizedDescription) }
@@ -170,7 +225,14 @@ enum CheckRunner {
         RawDisplayChecks.run()
         await GlobalSettingsChecks.run()
         await ModelProtocolMemoryChecks.run()
+        await AgentTaskChecks.run()
+        await HistoryScaleChecks.run()
+        await LargeBodyChecks.run()
+        await GlobalPerformanceChecks.run()
+        await LayoutChecks.historyDetails()
+        await AgentTaskRuntimeChecks.run()
         await AdvancedProxyChecks.run()
+        await EndToEndAuditChecks.run()
         DeepStoreChecks.run()
         PersistenceRegressionChecks.run()
         StoreChecks.run()

@@ -11,7 +11,7 @@ import AppKit
                 var record = DeepChecks.record(); record.model = "fixture-model"; expectTrue(store.save(record))
                 expectFalse(store.showFullContent); expectFalse(store.recordAllBodies); expectTrue(store.capturedCredentialIDs.isEmpty)
                 let headers = "Authorization: Bearer " + record.apiKey + "\nSet-Cookie: sid=fixture-private-cookie\naccess-control-allow-credentials: true"
-                let data = Data(("{\"echo\":\"" + record.apiKey + "\"}").utf8)
+                let data = Data(("{\"echo\":\"" + record.apiKey + "\",\"cookie\":\"fixture-private-cookie\"}").utf8)
                 var response = CheckedResponse(data, record: record); response.headers = headers
                 let hidden = store.displayResponse(response, request: nil)
                 expectFalse(hidden.contains(record.apiKey)); expectFalse(hidden.contains("fixture-private-cookie")); expectTrue(hidden.contains("access-control-allow-credentials: true"))
@@ -79,7 +79,7 @@ import AppKit
             expectFalse(initial.bodiesCaptured); expectTrue(initial.requestHeaders.isEmpty); expectTrue(initial.responseBody.isEmpty)
             expectTrue(store.setRecordAllBodies(true))
             _ = try await session.data(for: request); await InteractionFlowChecks.wait { store.history.entries.count == 2 }
-            let captured = try unwrap(store.history.entries.first)
+            let captured = try store.history.detail(for: unwrap(store.history.entries.first))
             expectTrue(captured.bodiesCaptured); expectTrue(captured.requestHeaders.contains(record.apiKey)); expectTrue(captured.requestBody.contains("fixture-request"))
             expectTrue(captured.responseHeaders.contains("fixture-response-auth")); expectTrue(captured.responseBody.contains("fixture-reply"))
             expectFalse(store.displayHeaders(captured.requestHeaders).contains(record.apiKey))

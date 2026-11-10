@@ -10,7 +10,43 @@ struct AgentQuestion: Equatable {
     var canReview = false
 }
 
+struct AgentChatMessage: Identifiable {
+    var id = UUID()
+    var isUser: Bool
+    var text: String
+    var images: [ImportImage] = []
+}
+
+enum AgentTaskState: Equatable {
+    case idle, running, waiting, stopping, completed, failed, stopped
+    var isBusy: Bool { self == .running || self == .waiting || self == .stopping }
+}
+
 @MainActor final class AgentInteraction: ObservableObject {
+    let activity: AgentActivity
+    init(activity: AgentActivity? = nil) { self.activity = activity ?? AgentActivity() }
+    @Published private(set) var taskState: AgentTaskState = .idle
+    private(set) var runID = UUID()
+    var isBusy: Bool { taskState.isBusy }
+    var isStopping: Bool { taskState == .stopping }
+    @Published var messages: [AgentChatMessage] = []
+    var supplement: (@MainActor (ImportPaste) async throws -> Void)?
+    func postUser(_ paste: ImportPaste) { messages.append(AgentChatMessage(isUser: true, text: paste.text, images: paste.images)) }
+    func postReply(_ text: String, runID: UUID? = nil) {
+        guard runID == nil || runID == self.runID else { return }
+        guard taskState != .stopping && taskState != .stopped else { return }
+        let value = text.trimmed
+        guard !value.isEmpty, messages.last?.isUser != false || messages.last?.text != value else { return }
+        messages.append(AgentChatMessage(isUser: false, text: value))
+    }
+    func postCompletion(summary: String, reply: String, runID: UUID? = nil) {
+        guard runID == nil || runID == self.runID else { return }
+        guard taskState != .stopping && taskState != .stopped else { return }
+        let value = summary.trimmed.isEmpty ? reply : summary
+        if let last = messages.indices.last, !messages[last].isUser, messages[last].text == reply {
+            messages[last].text = value
+        } else { postReply(value) }
+    }
     @Published var question: AgentQuestion?
     @Published var lastReply: AgentQuestion?
     @Published var failure: AgentQuestion?
@@ -21,31 +57,67 @@ struct AgentQuestion: Equatable {
     private var validate: (@MainActor (ImportPaste) throws -> Void)?
     var isWaiting: Bool { pending != nil }
     var displayedReply: AgentQuestion? { question ?? failure }
-    func begin() { failure = nil; error = nil }
-    func fail(_ message: String, recovery: AgentImportResult? = nil) {
+    @discardableResult func begin() -> UUID {
+        guard !isBusy else { return runID }
+        activity.prepareForRun()
+        runID = UUID(); taskState = .running; failure = nil; error = nil
+        return runID
+    }
+    @discardableResult func requestStop() -> Bool {
+        guard taskState == .running || taskState == .waiting else { return false }
+        taskState = .stopping; error = nil; supplement = nil
+        activity.phase("stopping"); cancel()
+        return true
+    }
+    func finishRun(_ id: UUID, cancelled: Bool = false) {
+        guard id == runID else { return }
+        if cancelled || taskState == .stopping {
+            guard taskState != .completed && taskState != .failed && taskState != .stopped else { return }
+            taskState = .stopped
+            activity.finish("stopped", detail: "已停止，输入资料和已有结果已保留。")
+        } else if taskState == .running || taskState == .waiting {
+            taskState = .completed
+            activity.finish("completed", detail: "整理完成，可以确认保存。")
+        }
+    }
+    func fail(_ message: String, recovery: AgentImportResult? = nil, runID: UUID? = nil) {
+        guard runID == nil || runID == self.runID else { return }
+        guard taskState != .stopping && taskState != .stopped else { return }
+        taskState = .failed
         let previous = lastReply?.question ?? ""
         failure = AgentQuestion(question: previous.isEmpty || message.contains(previous) ? message : previous + "\n\n执行中断：" + message)
         if let recovery { self.recovery = recovery }
         if lastReply == nil { lastReply = failure }
+        postReply(message)
+        activity.finish("failed", detail: message)
     }
 
     func ask(_ question: AgentQuestion, validate: @escaping @MainActor (ImportPaste) throws -> Void) async throws -> ImportPaste? {
         try Task.checkCancellation()
         guard pending == nil else { throw KeyDockError.message("已有待回答的问题。") }
         self.question = question; lastReply = question; self.validate = validate; error = nil
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { pending = $0 }
-        } onCancel: { Task { @MainActor in self.cancel() } }
+        postReply(question.question + (question.reason.isEmpty ? "" : "\n" + question.reason) + question.items.map { "\n• " + $0 }.joined())
+        activity.phase("waiting")
+        taskState = .waiting
+        do {
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { pending = $0 }
+            } onCancel: { Task { @MainActor in self.cancel() } }
+        } catch {
+            if Task.isCancelled && taskState == .waiting { finishRun(runID, cancelled: true) }
+            throw error
+        }
     }
-    func submit() {
+    @discardableResult func submit() -> Bool {
         var paste = document.paste
         if paste.text.trimmed.isEmpty && paste.images.isEmpty {
-            guard question?.canContinueWithoutReply == true else { error = "粘贴文字或图片后继续。"; return }
+            guard question?.canContinueWithoutReply == true else { error = "粘贴文字或图片后继续。"; return false }
             paste.text = "请根据现有资料继续尝试；如仍无法完成，请说明实际原因。"
         }
-        do { try validate?(paste) } catch { self.error = error.localizedDescription; return }
+        do { try validate?(paste) } catch { self.error = error.localizedDescription; return false }
         let continuation = pending; pending = nil; question = nil; validate = nil
         document = ImportDocument(); error = nil; continuation?.resume(returning: paste)
+        taskState = .running; activity.phase("running"); return true
     }
     func review() {
         guard question?.canReview == true else { return }

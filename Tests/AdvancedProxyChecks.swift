@@ -10,6 +10,8 @@ struct FixtureResponse {
     var interval: TimeInterval = 0
     var declaredLength: Int?
     var resetConnection = false
+    var headerDelay: TimeInterval = 0
+    var waitAfterFirstChunk: ((@escaping () -> Void) -> Void)?
 }
 
 final class FixtureServer: @unchecked Sendable {
@@ -25,6 +27,7 @@ final class FixtureServer: @unchecked Sendable {
     init(response: @escaping (LocalHTTPRequest) -> FixtureResponse) { self.response = response }
     func start() throws {
         let parameters = NWParameters.tcp
+        (parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         let listener = try NWListener(using: parameters)
         self.listener = listener
@@ -51,21 +54,26 @@ final class FixtureServer: @unchecked Sendable {
                     var header = "HTTP/1.1 \(response.status) Test\r\nConnection: close\r\nContent-Length: \(size)\r\n"
                     for (name, value) in response.headers { header += "\(name): \(value)\r\n" }
                     header += "\r\n"
-                    connection.send(content: Data(header.utf8), completion: .contentProcessed { _ in
+                    let sendHeader = { connection.send(content: Data(header.utf8), completion: .contentProcessed { _ in
                         if request.method == "HEAD" { self.finish(connection, id: id, reset: false) }
-                        else { self.send(response.chunks, index: 0, interval: response.interval, reset: response.resetConnection, connection: connection, id: id) }
-                    })
+                        else { self.send(response.chunks, index: 0, interval: response.interval, reset: response.resetConnection, connection: connection, id: id, gate: response.waitAfterFirstChunk) }
+                    }) }
+                    if response.headerDelay > 0 { self.queue.asyncAfter(deadline: .now() + response.headerDelay, execute: sendHeader) }
+                    else { sendHeader() }
                 } else if done || error != nil { connection.cancel(); self.connections.removeValue(forKey: id) }
                 else { self.read(connection, id: id, data: data) }
             } catch { connection.cancel(); self.connections.removeValue(forKey: id) }
         }
     }
-    private func send(_ chunks: [Data], index: Int, interval: TimeInterval, reset: Bool, connection: NWConnection, id: UUID) {
+    private func send(_ chunks: [Data], index: Int, interval: TimeInterval, reset: Bool, connection: NWConnection, id: UUID, gate: ((@escaping () -> Void) -> Void)?) {
         guard index < chunks.count else { finish(connection, id: id, reset: reset); return }
         connection.send(content: chunks[index], completion: .contentProcessed { error in
             if error != nil { connection.cancel(); self.connections.removeValue(forKey: id); return }
             if index + 1 == chunks.count { self.finish(connection, id: id, reset: reset) }
-            else { self.queue.asyncAfter(deadline: .now() + interval) { self.send(chunks, index: index + 1, interval: interval, reset: reset, connection: connection, id: id) } }
+            else {
+                let next = { self.queue.asyncAfter(deadline: .now() + interval) { self.send(chunks, index: index + 1, interval: interval, reset: reset, connection: connection, id: id, gate: gate) } }
+                if index == 0, let gate { gate(next) } else { next() }
+            }
         })
     }
     private func finish(_ connection: NWConnection, id: UUID, reset: Bool) {

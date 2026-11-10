@@ -176,23 +176,6 @@ import Vision
                 }
             }
         }
-        runCheck("Layout.local-logs-display-original-values-when-globally-enabled") {
-            try withFixture { store, record in
-                expectTrue(store.setShowFullContent(true))
-                var entry = log(record)
-                entry.bodiesCaptured = true
-                entry.requestBody = "{\"echo\":\"" + record.apiKey + "\"}"
-                entry.responseBody = record.apiKey
-                try render(ProxyLogView(entry: entry).environmentObject(store), size: NSSize(width: 760, height: 650)) { view in
-                    let request = try recognizedText(capture(view, name: nil))
-                    expectFalse(request.contains("已隐藏")); expectTrue(request.contains(record.apiKey))
-                    let control = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first)
-                    control.selectedSegment = 1; _ = control.sendAction(control.action, to: control.target); settle(view)
-                    let response = try recognizedText(capture(view, name: nil))
-                    expectFalse(response.contains("已隐藏")); expectTrue(response.contains(record.apiKey))
-                }
-            }
-        }
         runCheck("Layout.minimum-default-and-wide-main-window-controls-fit") {
             try withFixture { store, _ in
                 for (name, size) in [("main-minimum", NSSize(width: 900, height: 650)), ("main-default", NSSize(width: 1080, height: 760)), ("main-wide", NSSize(width: 1280, height: 850))] {
@@ -284,14 +267,365 @@ import Vision
             }
         }
     }
+    static func historyDetails() async {
+        NSApplication.shared.setActivationPolicy(.prohibited); NSApp.delegate = delegate
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-NativeHistory-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        do {
+                let key = SymmetricKey(size: .bits256), board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+                let store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false, pasteboard: board)
+                var record = DeepChecks.record(); record.apiKey = "fixture-history-auth-key"; expectTrue(store.save(record))
+                var entry = log(record); entry.bodiesCaptured = true
+                entry.requestBody = #"{"messages":[{"content":"\u4f60\u597d，输入完整可读"}],"model":"fixture"}"#
+                entry.responseBody = "data: {\"delta\":\"\\u4f60\\u597d，响应可见\"}\n\ndata: [DONE]\n\n"
+                store.history.append(entry); store.history.flush()
+                let metadata = try unwrap(store.history.entries.first)
+                try await renderAsync(ProxyLogView(entry: metadata).environmentObject(store), size: NSSize(width: 820, height: 720)) { view in
+                    let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                    for _ in 0..<20 { if descendants(view).compactMap({ $0 as? NSTextView }).first(where: { !$0.isHiddenOrHasHiddenAncestor })?.string.contains("输入完整可读") == true { break }; try await Task.sleep(for: .milliseconds(50)); settle(view) }
+                    let text = try unwrap(descendants(view).compactMap { $0 as? NSTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                    expectTrue(text.string.contains("你好")); expectTrue(text.string.contains("\n")); expectTrue(text.enclosingScrollView?.frame.height ?? 0 > 200)
+                    window.makeFirstResponder(text); text.selectAll(nil)
+                    expectEqual(text.selectedRange().length, text.string.utf16.count)
+                    text.copy(nil); expectEqual(board.string(forType: .string), text.string)
+                    try clickText("复制请求", in: view); expectTrue(board.string(forType: .string)?.contains("已隐藏") == true); expectFalse(board.string(forType: .string)?.contains(record.apiKey) == true)
+                    _ = try capture(view, name: "call-request-formatted")
+                    let picker = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first { $0.segmentCount == 2 && $0.label(forSegment: 0) == "Request" })
+                    picker.selectedSegment = 1; _ = picker.sendAction(picker.action, to: picker.target); settle(view)
+                    for _ in 0..<20 { if descendants(view).compactMap({ $0 as? NSTextView }).first(where: { !$0.isHiddenOrHasHiddenAncestor })?.string.contains("响应可见") == true { break }; try await Task.sleep(for: .milliseconds(50)); settle(view) }
+                    let response = try unwrap(descendants(view).compactMap { $0 as? NSTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                    expectTrue(response.string.contains("你好，响应可见")); expectTrue(response.string.contains("[DONE]"))
+                    try clickText("复制正文", in: view); expectEqual(board.string(forType: .string), response.string)
+                    _ = try capture(view, name: "call-response-formatted-SSE")
+                }
+            checkpoint("Layout.call-details-format-Chinese-show-response-and-copy-all-to-private-clipboard")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Layout.call-details-format-Chinese-show-response-and-copy-all-to-private-clipboard") }
+        runCheck("Layout.history-pages-show-ten-rows-and-last-page-and-clear-remain-consistent") {
+            try withFixture { store, record in
+                for index in 0..<21 { var entry = log(record); entry.model = String(format: "page-fixture-%02d", index); store.history.append(entry) }
+                defer { store.history.flush() }
+                try render(ScrollView { ProxyHistoryPanel(credentialID: record.id, history: store.history, onChangeCapture: {}, onUse: {}).environmentObject(store).padding(24) }, size: NSSize(width: 760, height: 1400)) { view in
+                    let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                    var text = try recognizedText(capture(view, name: "history-page-one"))
+                    expectEqual(text.components(separatedBy: "下一页").count - 1, 1)
+                    expectTrue(text.contains("page-fixture-20")); expectFalse(text.contains("page-fixture-10"))
+                    try clickText("下一页", in: view)
+                    text = try recognizedText(capture(view, name: "history-page-two")); expectTrue(text.contains("page-fixture-10")); expectFalse(text.contains("page-fixture-20"))
+                    try clickText("下一页", in: view)
+                    text = try recognizedText(capture(view, name: "history-page-three")); expectTrue(text.contains("page-fixture-00")); expectFalse(text.contains("page-fixture-01"))
+                    store.history.clear(record.id); settle(view)
+                    expectTrue(try recognizedText(capture(view, name: nil)).contains("还没有调用记录"))
+                }
+            }
+        }
+        await fullContentLogs()
+    }
+    private static func fullContentLogs() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-LogVisibility-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = SymmetricKey(size: .bits256), board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+        do {
+            let store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false, pasteboard: board)
+            let record = DeepChecks.record(); expectTrue(store.save(record)); expectTrue(store.setShowFullContent(true))
+            var entry = log(record); entry.bodiesCaptured = true
+            entry.requestBody = "{\"echo\":\"" + record.apiKey + "\"}"; entry.responseBody = record.apiKey
+            try await renderAsync(ProxyLogView(entry: entry).environmentObject(store), size: NSSize(width: 760, height: 650)) { view in
+                for _ in 0..<50 {
+                    if descendants(view).compactMap({ $0 as? HTTPBodyViewportHost }).first?.availableDocumentCount == 4 { break }
+                    try await Task.sleep(for: .milliseconds(20)); view.layoutSubtreeIfNeeded()
+                }
+                settle(view)
+                let request = try recognizedText(capture(view, name: nil))
+                expectFalse(request.contains("已隐藏")); expectTrue(request.contains(record.apiKey))
+                let control = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first)
+                control.selectedSegment = 1; _ = control.sendAction(control.action, to: control.target); settle(view)
+                let response = try recognizedText(capture(view, name: nil))
+                expectFalse(response.contains("已隐藏")); expectTrue(response.contains(record.apiKey))
+            }
+            checkpoint("Layout.local-logs-display-original-values-when-globally-enabled")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Layout.log-visibility") }
+    }
+    static func largeBodyDetails() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-LargeBodyPopup-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = SymmetricKey(size: .bits256), board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+        do {
+            let store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false, pasteboard: board)
+            let record = DeepChecks.record(); expectTrue(store.save(record))
+            var entry = log(record); entry.bodiesCaptured = true
+            entry.requestBody = LargeBodyChecks.source()
+            entry.responseBody = String(repeating: "data: {\"delta\":\"\\u4f60\\u597d，实际响应🙂\"}\n\n", count: 22000) + "data: [DONE]\n\n"
+            try await renderAsync(ProxyLogView(entry: entry).environmentObject(store), size: NSSize(width: 820, height: 720)) { view in
+                let window = try unwrap(view.window); window.makeKeyAndOrderFront(nil); settle(view)
+                for _ in 0..<250 {
+                    if descendants(view).compactMap({ $0 as? HTTPBodyViewportHost }).first?.availableDocumentCount == 4 { break }
+                    try await Task.sleep(for: .milliseconds(40)); view.layoutSubtreeIfNeeded()
+                }
+                let viewport = try unwrap(descendants(view).compactMap { $0 as? HTTPBodyViewportHost }.first)
+                expectEqual(viewport.availableDocumentCount, 4)
+                let side = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first { $0.label(forSegment: 0) == "Request" })
+                let mode = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first { $0.label(forSegment: 0) == "格式化" })
+                var gap = 0.0
+                let heartbeat = Task { @MainActor in
+                    var previous = Date()
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .milliseconds(10)) } catch { return }
+                        let now = Date(); gap = max(gap, now.timeIntervalSince(previous)); previous = now
+                    }
+                }
+                defer { heartbeat.cancel() }
+                var identities = Set<UUID>()
+                for index in 0..<24 {
+                    side.selectedSegment = index % 2; _ = side.sendAction(side.action, to: side.target)
+                    mode.selectedSegment = (index / 2) % 2; _ = mode.sendAction(mode.action, to: mode.target)
+                    try await Task.sleep(for: .milliseconds(15)); view.layoutSubtreeIfNeeded(); view.display()
+                    if let id = viewport.documentID { identities.insert(id) }
+                    let document = try unwrap(descendants(view).compactMap { $0 as? HTTPVirtualTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                    expectTrue(document.renderedRowCount > 0 && document.renderedRowCount < 60)
+                    if mode.selectedSegment == 1 { expectEqual(document.document.text, side.selectedSegment == 0 ? entry.requestBody : entry.responseBody) }
+                }
+                heartbeat.cancel(); expectEqual(identities.count, 4); expectTrue(gap < 0.25)
+                print("BODY POPUP METRICS switches=24 main_heartbeat_max_ms=\(Int(gap * 1000)) documents=\(identities.count)")
+                try clickText("复制正文", in: view)
+                let visible = try unwrap(descendants(view).compactMap { $0 as? HTTPVirtualTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                expectEqual(board.string(forType: .string), visible.document.text)
+                _ = try capture(view, name: "call-large-response")
+                side.selectedSegment = 0; _ = side.sendAction(side.action, to: side.target); settle(view)
+                _ = try capture(view, name: "call-large-request")
+            }
+            checkpoint("Layout.large-log-popup-switches-real-controls-without-blocking-and-copies-the-complete-selected-body")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Layout.large-log-popup") }
+    }
+    static func commonPreparedPanels() async {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-SharedPanels-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let key = SymmetricKey(size: .bits256), board = NSPasteboard.withUniqueName(); defer { board.releaseGlobally() }
+        do {
+            let store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false, pasteboard: board)
+            var record = DeepChecks.record(); record.apiKey = "fixture-shared-panel-secret"; expectTrue(store.save(record))
+            var request = URLRequest(url: URL(string: "https://fixture.invalid/chat/completions")!)
+            request.httpMethod = "POST"; request.setValue("Bearer " + record.apiKey, forHTTPHeaderField: "Authorization")
+            request.httpBody = Data(("{\"key\":\"" + record.apiKey + "\",\"input\":" + LargeBodyChecks.source() + "}").utf8)
+            let checked = CheckedRequest(request), response = CheckedResponse(request.httpBody!, record: record)
+            let result = CheckResult(state: .valid, message: "fixture", httpStatus: 200, request: checked, response: response)
+            try await renderAsync(VerificationEvidenceView(result: result, request: checked).environmentObject(store).padding(24), size: NSSize(width: 820, height: 540)) { view in
+                let window = try unwrap(view.window); window.makeKeyAndOrderFront(nil)
+                for _ in 0..<300 {
+                    if descendants(view).compactMap({ $0 as? HTTPBodyViewportHost }).first?.availableDocumentCount == 2 { break }
+                    try await Task.sleep(for: .milliseconds(30)); view.layoutSubtreeIfNeeded()
+                }
+                let viewport = try unwrap(descendants(view).compactMap { $0 as? HTTPBodyViewportHost }.first)
+                expectEqual(viewport.availableDocumentCount, 2)
+                let picker = try unwrap(descendants(view).compactMap { $0 as? NSSegmentedControl }.first)
+                var ids = Set<UUID>()
+                for index in 0..<8 {
+                    picker.selectedSegment = index % 2; _ = picker.sendAction(picker.action, to: picker.target)
+                    try await Task.sleep(for: .milliseconds(15)); settle(view)
+                    if let id = viewport.documentID { ids.insert(id) }
+                    let text = try unwrap(descendants(view).compactMap { $0 as? HTTPVirtualTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                    expectFalse(text.document.text.contains(record.apiKey))
+                }
+                expectEqual(ids.count, 2)
+                expectTrue(try recognizedText(capture(view, name: "verification-large-cached-response")).contains("128 KB"))
+                try clickText("复制响应", in: view)
+                let text = try unwrap(descendants(view).compactMap { $0 as? HTTPVirtualTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                expectEqual(board.string(forType: .string), text.document.text)
+            }
+            checkpoint("Layout.verification-evidence-reuses-large-request-and-response-documents-and-retains-truncation-and-copy")
+            record.source = "API Key: " + record.apiKey + "\nBase URL: https://fixture.invalid/v1\n" + String(repeating: "导入说明文字\n", count: 20000)
+            try await renderAsync(CredentialSourceView(record: record).environmentObject(store).padding(24), size: NSSize(width: 820, height: 440)) { view in
+                for _ in 0..<300 {
+                    if descendants(view).compactMap({ $0 as? HTTPBodyViewportHost }).first?.availableDocumentCount == 1 { break }
+                    try await Task.sleep(for: .milliseconds(30)); view.layoutSubtreeIfNeeded()
+                }
+                settle(view)
+                let text = try unwrap(descendants(view).compactMap { $0 as? HTTPVirtualTextView }.first { !$0.isHiddenOrHasHiddenAncestor })
+                expectFalse(text.document.text.contains(record.apiKey)); expectTrue(text.document.text.contains("KEYDOCK_SECRET_"))
+                text.selectAll(nil); text.copy(nil); expectEqual(board.string(forType: .string), text.document.text)
+                _ = try capture(view, name: "source-large-prepared")
+            }
+            checkpoint("Layout.large-original-source-prepares-off-main-and-copies-all-masked-material")
+        } catch { checkFailures.append(error.localizedDescription); checkpoint("Layout.shared-prepared-panels") }
+    }
+    static func promptEditor() {
+        NSApplication.shared.setActivationPolicy(.prohibited)
+        runCheck("Layout.Agent-prompt-editor-loads-external-file-and-saves-native-edits") {
+            try NewFeatureChecks.isolated { root in
+                let configuration = AgentPromptConfiguration(directory: root)
+                let runtime = try AgentWorker.resources().runtime
+                try configuration.save("原有提示词", runtime: runtime)
+                try render(AgentPromptSettingsView(configuration: configuration), size: NSSize(width: 760, height: 650)) { view in
+                    let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                    let editor = try unwrap(descendants(view).compactMap { $0 as? NSTextView }.first)
+                    expectEqual(editor.string, "原有提示词")
+                    let text = try recognizedText(capture(view, name: "agent-prompt-editor"))
+                    expectTrue(text.contains("下次新任务")); expectTrue(text.contains("恢复默认")); expectTrue(text.contains("保存"))
+                    window.makeFirstResponder(editor)
+                    editor.insertText("通过设置编辑的新提示词", replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+                    settle(view)
+                    try clickText("保存", in: view)
+                    let saved = try configuration.load(runtime: runtime)
+                    expectEqual(saved, "通过设置编辑的新提示词")
+                }
+            }
+        }
+    }
     static func audit() {
         NSApplication.shared.setActivationPolicy(.prohibited); NSApp.delegate = delegate
+        runCheck("Layout.chat-follows-new-progress-and-preserves-manual-reading-position") {
+            let state = ConversationFixtureState(), activity = AgentActivity()
+            state.lines = (0..<100).map { "line \($0): observed output" }
+            try render(ConversationScrollFixture(state: state, activity: activity), size: NSSize(width: 680, height: 300)) { view in
+                let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                let scroll = try unwrap(descendants(view).compactMap { $0 as? NSScrollView }.first)
+                expectTrue((scroll.documentView?.bounds.maxY ?? 0) - scroll.documentVisibleRect.maxY < 32)
+                scroll.contentView.scroll(to: .zero); scroll.reflectScrolledClipView(scroll.contentView); settle(view)
+                state.lines += (100..<140).map { "line \($0): new output" }; settle(view)
+                expectTrue(scroll.contentView.bounds.origin.y < 3)
+                try clickText("回到最新消息", in: view); settle(view)
+                expectTrue((scroll.documentView?.bounds.maxY ?? 0) - scroll.documentVisibleRect.maxY < 32)
+                state.lines.append("final latest message"); settle(view)
+                expectTrue((scroll.documentView?.bounds.maxY ?? 0) - scroll.documentVisibleRect.maxY < 32)
+                _ = try capture(view, name: "chat-reading-position")
+            }
+        }
+        runCheck("Layout.import-is-one-task-conversation-with-an-inline-composer-and-folded-process") {
+            try withFixture { store, record in
+                let interaction = AgentInteraction()
+                interaction.postUser(ImportPaste(text: "请整理这份网关资料，不要丢失图片。"))
+                interaction.postReply("已经读取资料；当前部署返回 model_not_found，请确认实际模型 ID。")
+                interaction.activity.begin(raw: "fixture material", service: record, model: record.model)
+                interaction.activity.note("验证结果 · HTTP 404", detail: "model_not_found")
+                try render(ImportView(initialPaste: ImportPaste(text: "请继续核对部署配置。"), conversation: interaction).environmentObject(store), size: NSSize(width: 780, height: 650)) { view in
+                    let text = try recognizedText(capture(view, name: "agent-task-conversation"))
+                    expectTrue(text.replacingOccurrences(of: "_", with: "").replacingOccurrences(of: " ", with: "").contains("modelnotfound"))
+                    expectTrue(text.contains("查看过程"))
+                    expectTrue(text.contains("发送"))
+                    expectEqual(descendants(view).compactMap { $0 as? ImportTextEditor.PasteTextView }.count, 1)
+                    let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                    try clickText("查看过程", in: view)
+                    _ = try capture(view, name: "agent-task-conversation-process")
+                    let process = try recognizedText(capture(view, name: "agent-task-conversation-expanded"))
+                    expectTrue(process.contains("复制全部日志"))
+                }
+            }
+        }
+        runCheck("Layout.process-shows-key-progress-and-copies-complete-diagnostics-without-a-second-scroller") {
+            let activity = AgentActivity(), record = DeepChecks.record()
+            activity.begin(raw: "fixture material", service: record, model: "fixture")
+            activity.note("整理模型请求", detail: "diagnostic-only-payload", diagnosticOnly: true)
+            activity.update(id: "catalog", title: "获取模型列表 · list_models", detail: "catalog-raw-json", state: "completed", summary: "已获取 11 个模型")
+            var copied = ""
+            try render(AgentProcessView(activity: activity, onCopy: { copied = $0 }), size: NSSize(width: 780, height: 300)) { view in
+                let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                let text = try recognizedText(capture(view, name: "process-key-progress"))
+                expectTrue(text.contains("11")); expectFalse(text.contains("catalog-raw-json")); expectFalse(text.contains("diagnostic-only-payload"))
+                expectTrue(descendants(view).compactMap { $0 as? NSScrollView }.isEmpty)
+                try clickText("复制全部日志", in: view)
+                expectTrue(copied.contains("catalog-raw-json")); expectTrue(copied.contains("diagnostic-only-payload")); expectTrue(copied.contains("fixture material"))
+                activity.finish("completed", detail: "1 条凭据已验证"); settle(view)
+                try clickText("查看过程", in: view)
+                let expanded = try recognizedText(capture(view, name: "process-completed-history"))
+                expectTrue(expanded.contains("11")); expectFalse(expanded.contains("catalog-raw-json"))
+            }
+        }
+        runCheck("Layout.chat-at-compact-default-and-wide-sizes-keeps-the-composer-visible") {
+            try withFixture { store, record in
+                for size in [NSSize(width: 720, height: 600), NSSize(width: 840, height: 700), NSSize(width: 1040, height: 820)] {
+                    let interaction = AgentInteraction()
+                    for index in 0..<8 {
+                        interaction.postUser(ImportPaste(text: "第 \(index + 1) 份资料\n" + String(repeating: "补充网关说明与接入要求。", count: 30)))
+                        interaction.postReply("已读取资料，正在核对接入配置。")
+                    }
+                    interaction.activity.begin(raw: "fixture", service: record, model: record.model)
+                    interaction.activity.update(id: "catalog", title: "获取模型列表", detail: "fixture diagnostic", state: "completed", summary: "已获取 11 个模型")
+                    interaction.activity.phase("waiting")
+                    interaction.postReply("请补充实际部署 ID，可以直接粘贴控制台配置。")
+                    let paste = ImportPaste(text: "请使用补充的部署配置。")
+                    try render(ImportView(initialPaste: paste, conversation: interaction).environmentObject(store), size: size) { view in
+                        let editor = try unwrap(descendants(view).compactMap { $0 as? ImportTextEditor.PasteTextView }.first)
+                        let composer = try unwrap(editor.enclosingScrollView)
+                        let frame = composer.convert(composer.bounds, to: view)
+                        expectTrue(frame.minY >= 0 && frame.maxY <= view.bounds.maxY + 1)
+                        expectTrue(frame.height >= 60)
+                        let chat = try unwrap(descendants(view).compactMap { $0 as? NSScrollView }.filter { $0 !== composer }.max { $0.frame.height < $1.frame.height })
+                        expectTrue(chat.frame.height >= size.height * 0.5)
+                        let text = try recognizedText(capture(view, name: "chat-layout-\(Int(size.width))"))
+                        expectTrue(text.contains("整理凭据")); expectTrue(text.contains("发送")); expectTrue(text.contains("实际部署"))
+                    }
+                }
+            }
+        }
+        runCheck("Layout.stop-keeps-the-task-and-composer-visible-without-modal-errors") {
+            try withFixture { store, record in
+                let interaction = AgentInteraction()
+                interaction.postUser(ImportPaste(text: "保留本次资料。"))
+                try render(ImportView(initialPaste: ImportPaste(text: "尚未发送的补充内容"), conversation: interaction).environmentObject(store), size: NSSize(width: 840, height: 700)) { view in
+                    let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
+                    let id = interaction.begin()
+                    interaction.activity.begin(raw: "fixture material", service: record, model: record.model)
+                    interaction.activity.update(id: "running", title: "验证调用", detail: "fixture request", state: "running", summary: "正在等待服务响应")
+                    settle(view)
+                    let messages = interaction.messages.count
+                    try clickText("停止", in: view)
+                    expectTrue(interaction.isStopping); expectEqual(interaction.messages.count, messages); expectNil(NSApp.modalWindow)
+                    let editor = try unwrap(descendants(view).compactMap { $0 as? ImportTextEditor.PasteTextView }.first)
+                    expectTrue(editor.string.contains("尚未发送")); expectTrue(window.isVisible)
+                    interaction.finishRun(id, cancelled: true); settle(view)
+                    let text = try recognizedText(capture(view, name: "chat-stopped-preserved"))
+                    expectTrue(text.contains("已停止")); expectTrue(text.contains("关闭")); expectTrue(text.contains("尚未发送"))
+                    expectNil(interaction.failure); expectNil(interaction.error); expectNil(NSApp.modalWindow)
+                }
+            }
+        }
+        runCheck("Layout.unconfigured-balance-shows-a-disabled-query-and-an-inline-reason") {
+            try withFixture { store, original in
+                var record = original; record.baseURL = "https://relay.invalid/v1"; record.balanceURL = ""; record.balancePath = ""; record.notes = ""; record.check = nil
+                expectTrue(store.save(record)); record = try unwrap(store.selected)
+                expectTrue(APIClient.balanceIssue(record) != nil)
+                try render(CredentialDetail(record: record, initialTab: .info, edit: {}).environmentObject(store), size: NSSize(width: 900, height: 760)) { view in
+                    let text = try recognizedText(capture(view, name: "balance-capability-disabled")).replacingOccurrences(of: " ", with: "")
+                    expectTrue(text.contains("查询余额")); expectTrue(text.contains("未配置余额查询接口"))
+                    try clickText("查询余额", in: view)
+                    expectNil(store.error); expectTrue(store.balanceChecking.isEmpty)
+                }
+            }
+        }
+        runCheck("Layout.import-source-replays-persisted-images-and-explains-legacy-missing-images") {
+            try withFixture { store, original in
+                var record = original; record.source = "原始资料\n[图片 1]"; record.sourceImages = [try documentImage()]
+                try render(CredentialSourceView(record: record).environmentObject(store).padding(20), size: NSSize(width: 680, height: 370)) { view in
+                    let text = try recognizedText(capture(view, name: "source-with-persisted-image"))
+                    expectTrue(text.contains("原始图片")); expectTrue(text.contains("双击放大"))
+                    expectFalse(text.contains("没有保留原图"))
+                }
+                record.sourceImages = nil
+                try render(CredentialSourceView(record: record).environmentObject(store).padding(20), size: NSSize(width: 680, height: 370)) { view in
+                    expectTrue(try recognizedText(capture(view, name: "legacy-source-without-image")).contains("没有保留原图"))
+                }
+            }
+        }
+        runCheck("Layout.returning-to-a-verified-model-displays-its-original-status-and-request") {
+            try withFixture { store, original in
+                var record = try unwrap(store.credentials.first { $0.id == original.id })
+                record.model = "fixture-verified-model"
+                record.check = CheckResult(state: .valid, message: "当前模型调用验证通过。", httpStatus: 200, requestMethod: "POST", request: CheckedRequest(try APIClient.modelRequest(for: record)), response: CheckedResponse(Data(#"{"choices":[{"message":{"content":"fixture-original-answer"}}]}"#.utf8), record: record))
+                expectTrue(store.importRecords([])); expectTrue(store.commit { next in if let index = next.credentials.firstIndex(where: { $0.id == record.id }) { next.credentials[index] = record } })
+                store.selectModel("fixture-other-model", for: try unwrap(store.selected)); store.selectModel(record.model, for: try unwrap(store.selected))
+                let restored = try unwrap(store.selected)
+                expectEqual(restored.check, record.check)
+                try render(CredentialDetail(record: restored, edit: {}).environmentObject(store), size: NSSize(width: 700, height: 900)) { view in
+                    let text = try recognizedText(capture(view, name: "restored-model-verification"))
+                    expectTrue(text.contains("调用通过")); expectTrue(text.contains("HTTP 200"))
+                }
+            }
+        }
         runCheck("Layout.system-settings-toggles-apply-globally-and-are-readable") {
             try withFixture { store, _ in
                 try render(SystemSettingsView().environmentObject(store), size: NSSize(width: 560, height: 470)) { view in
                     let window = try unwrap(view.window); window.styleMask = [.titled]; window.makeKeyAndOrderFront(nil); settle(view)
                     let before = try recognizedText(capture(view, name: "system-settings-default"))
-                    expectTrue(before.contains("系统设置")); expectTrue(before.contains("智能整理")); expectTrue(before.contains("显示完整密钥与请求内容"))
+                    expectTrue(before.contains("系统设置")); expectTrue(before.contains("智能整理")); expectTrue(before.contains("显示完整密钥与请求内容")); expectTrue(before.contains("编辑提示词"))
                     expectFalse(store.showFullContent); expectFalse(store.recordAllBodies)
                     try clickText("显示完整密钥与请求内容", in: view); expectTrue(store.showFullContent)
                     try clickText("为所有 Key 记录请求与响应", in: view); expectTrue(store.recordAllBodies)
@@ -300,6 +634,7 @@ import Vision
                 }
             }
         }
+        promptEditor()
         runCheck("Layout.raw-request-and-edit-field-show-original-Key-when-globally-enabled") {
             try withFixture { store, original in
                 expectTrue(store.setShowFullContent(true))
@@ -427,8 +762,23 @@ import Vision
         let window = try unwrap(view.window), bitmap = try capture(view, name: nil)
         let request = VNRecognizeTextRequest(); request.recognitionLevel = .accurate; request.recognitionLanguages = ["zh-Hans", "en-US"]
         try VNImageRequestHandler(cgImage: try unwrap(bitmap.cgImage)).perform([request])
-        let observation = try unwrap(request.results?.first { $0.topCandidates(1).first?.string == title })
-        let box = observation.boundingBox
+        let compactTitle = title.replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression)
+        let observations = request.results ?? []
+        let observation = try unwrap(observations.first {
+            // Vision may include a selected checkbox's tick or change spaces.
+            ($0.topCandidates(1).first?.string ?? "").replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression).hasSuffix(compactTitle)
+        } ?? observations.first { ($0.topCandidates(1).first?.string ?? "").replacingOccurrences(of: #"\s"#, with: "", options: .regularExpression).contains(compactTitle) })
+        var box = observation.boundingBox
+        if let candidate = observation.topCandidates(1).first {
+            let text = candidate.string
+            let indices = text.indices.filter { !text[$0].isWhitespace }
+            let compact = String(indices.map { text[$0] })
+            if let match = compact.range(of: compactTitle) {
+                let start = compact.distance(from: compact.startIndex, to: match.lowerBound)
+                let end = compact.distance(from: compact.startIndex, to: match.upperBound)
+                if start < indices.count, end > start, let focused = try candidate.boundingBox(for: indices[start]..<text.index(after: indices[end - 1])) { box = focused.boundingBox }
+            }
+        }
         let point = view.convert(NSPoint(x: box.midX * view.bounds.width, y: (view.isFlipped ? 1 - box.midY : box.midY) * view.bounds.height), to: nil)
         let down = try unwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
         let up = try unwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime + 0.1, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 0))
@@ -468,6 +818,12 @@ import Vision
         var entry = ProxyLogEntry(credentialID: record.id, method: "POST", model: record.model, status: 200, inputTokens: 48, outputTokens: 126, requestURL: record.baseURL + "/chat/completions")
         entry.duration = 1.24; entry.requestHeaders = "Content-Type: application/json\nAuthorization: Bearer " + record.apiKey
         entry.responseHeaders = "Content-Type: application/json"; return entry
+    }
+    private static func renderAsync<V: View>(_ root: V, size: NSSize, _ work: (NSHostingView<AnyView>) async throws -> Void) async throws {
+        let view = NSHostingView(rootView: AnyView(root.tint(Palette.accent).preferredColorScheme(.light).environment(\.controlActiveState, .key).background(Color.white)))
+        let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view; window.setContentSize(size); defer { window.close() }
+        try await Task.sleep(for: .milliseconds(50)); settle(view); try await work(view)
     }
     private static func render<V: View>(_ root: V, size: NSSize, _ work: (NSHostingView<AnyView>) throws -> Void) throws {
         let view = NSHostingView(rootView: AnyView(root.disclosureGroupStyle(FullRowDisclosureStyle()).tint(Palette.accent).preferredColorScheme(.light).environment(\.controlActiveState, .key).background(Color.white)))
@@ -510,4 +866,19 @@ import Vision
         return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
     }
     private static func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+}
+
+@MainActor private final class ConversationFixtureState: ObservableObject {
+    @Published var lines: [String] = []
+}
+private struct ConversationScrollFixture: View {
+    @ObservedObject var state: ConversationFixtureState
+    @ObservedObject var activity: AgentActivity
+    var body: some View {
+        AgentConversationScroll(activity: activity, revision: String(state.lines.count)) {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(state.lines.enumerated()), id: \.offset) { _, line in Text(line).frame(maxWidth: .infinity, alignment: .leading) }
+            }.padding(16)
+        }
+    }
 }

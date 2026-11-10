@@ -20,7 +20,10 @@ struct AgentImportResult {
     var documentTexts: [String] = []
     var documentIssues: [String] = []
     var candidates: [Credential] = []
-    var activity: [String] = []
+    var diagnostic: ((String, String) -> Void)?
+    var activity: [String] = [] {
+        didSet { for item in activity.dropFirst(oldValue.count) { diagnostic?(item, "") } }
+    }
     var summary = ""
     var finished = false
     var verificationCalls = 0
@@ -102,9 +105,10 @@ struct AgentImportResult {
             default: throw KeyDockError.message("未知宿主工具。")
             }
         } catch {
-            let message = safe((error as? KeyDockError)?.localizedDescription ?? (Task.isCancelled ? "任务已停止。" : "操作未完成，请根据已有结果调整后重试。"))
+            let message = safe(APIClient.failureMessage(error))
             activity.append(message)
-            return ["ok": false, "error": message]
+            let ns = error as NSError
+            return ["ok": false, "error": message, "error_domain": ns.domain, "error_code": ns.code]
         }
     }
     private func loadCatalog(_ index: Int) async throws -> [String: Any] {
@@ -115,10 +119,11 @@ struct AgentImportResult {
         let result = await APIClient.fetchModels(record, session: session)
         try Task.checkCancellation()
         guard let current = candidates.firstIndex(where: { $0.id == record.id && $0.fingerprint == record.fingerprint }) else { throw KeyDockError.message("候选配置已改变，请重新获取模型列表。") }
+        diagnostic?("模型目录结果", (result.request?.curl ?? result.endpoint) + "\n" + result.message + "\n" + (result.response?.text ?? "") + "\n" + result.models.joined(separator: "\n"))
         let models = result.models.filter { safe($0) == $0 }
         if result.state == .valid, !models.isEmpty || candidates[current].modelCatalog == nil { candidates[current].modelCatalog = ModelCatalog(models: models) }
         activity.append("获取模型列表：" + (result.state == .valid ? "\(models.count) 个（接口当前页）" : safe(result.message)))
-        return ["ok": result.state == .valid, "models": models, "message": safe(result.message)]
+        return ["ok": result.state == .valid, "models": models, "message": safe(result.message), "status": result.httpStatus as Any? ?? NSNull(), "endpoint": safe(result.endpoint), "response_excerpt": safe(String((result.response?.body ?? "").prefix(8192)))]
     }
     func safe(_ text: String) -> String {
         let models = Set(candidates.map(\.model)), keys = Set(candidates.flatMap(\.secretValues))
@@ -128,7 +133,8 @@ struct AgentImportResult {
         var records = candidates
         for index in records.indices {
             for field in [\Credential.name, \.provider, \.purpose, \.notes, \.tags, \.docsURL] { records[index][keyPath: field] = safe(records[index][keyPath: field]) }
-            records[index].source = credentialSource
+            records[index].source = original
+            records[index].sourceImages = images.isEmpty ? nil : images
             if let template = records[index].callTemplate, safe(template.body) != template.body {
                 records[index].callTemplate = nil; records[index].check = nil
                 records[index].notes += "\n调用示例混入了其他凭据，已移除，请修正后重新验证。"
@@ -153,12 +159,19 @@ struct AgentImportResult {
             candidate.verificationURL = preset.catalogURL ?? ""
             candidate.balanceURL = preset.balanceURL ?? ""; candidate.balancePath = preset.balancePath; candidate.balanceUnit = preset.balanceUnit
         }
-        candidate.modelCatalog = candidates.first(where: { $0.fingerprint == candidate.fingerprint })?.modelCatalog
+        let previous: Credential?
+        if let id = args["id"] as? String {
+            previous = candidates.first { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }
+        } else { previous = candidates.first { $0.fingerprint == candidate.fingerprint } }
+        if let previous { candidate.id = previous.id }
+        let sameCatalog = previous.map { candidate.hasSameModelCatalogConfiguration(as: $0) } ?? false
+        candidate.modelCatalog = sameCatalog ? previous?.modelCatalog : nil
         if let models = args["models"] as? [String] {
             guard models.count <= 1000 else { throw KeyDockError.message("资料中的模型列表过长，请分批核对。") }
             let evidence = credentialSource + "\n" + documentTexts.joined(separator: "\n")
+            let observed = Set(candidate.modelCatalog?.source == "资料" ? [] : candidate.modelCatalog?.models ?? [])
             let values = Array(Set(models.map { redacted.restore($0).trimmed }.filter { !$0.isEmpty })).sorted()
-            guard values.allSatisfy({ evidence.contains($0) && candidate.modelIssue($0) == nil && safe($0) == $0 && !$0.contains("KEYDOCK_SECRET_") }) else { throw KeyDockError.message("模型列表含未经资料核对的名称或敏感片段，请使用正文中实际出现的模型 ID。") }
+            guard values.allSatisfy({ (observed.contains($0) || evidence.contains($0)) && candidate.modelIssue($0) == nil && safe($0) == $0 && !$0.contains("KEYDOCK_SECRET_") }) else { throw KeyDockError.message("模型列表含未经核对的名称或敏感片段，请使用本候选 list_models 已返回或资料正文中实际出现的模型 ID。") }
             if !values.isEmpty, candidate.modelCatalog == nil || candidate.modelCatalog?.source == "资料" {
                 candidate.modelCatalog = ModelCatalog(models: values, source: "资料")
             }
@@ -169,6 +182,11 @@ struct AgentImportResult {
         }
         candidate.name = safe(candidate.name); candidate.provider = safe(candidate.provider)
         candidate.purpose = safe(candidate.purpose); candidate.notes = safe(candidate.notes); candidate.tags = safe(candidate.tags)
+        if let previous, sameCatalog, previous.model == candidate.model {
+            // Descriptive edits do not change the request already verified.
+            candidate.check = previous.check; candidate.connectionCheck = previous.connectionCheck
+            candidate.callTemplate = previous.callTemplate; candidate.verificationHistory = previous.verificationHistory
+        }
         if let id = args["id"] as? String, let index = candidates.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) {
             guard candidates[index].apiKey == candidate.apiKey else { throw KeyDockError.message("不能把已有候选改为另一个 Key，请为不同 Key 新建候选。") }
             candidate.id = candidates[index].id; candidates[index] = candidate
@@ -179,14 +197,18 @@ struct AgentImportResult {
         }
         let issue = candidate.baseURL.isEmpty ? "基础地址不在已提供或已获取的资料中，已留空；请先读取对应文档后修正。" : ""
         activity.append("已整理：" + candidate.title)
-        return ["ok": true, "id": candidate.id.uuidString, "base_url": candidate.baseURL, "model": candidate.model, "issues": issue, "verified": false]
+        return ["ok": true, "id": candidate.id.uuidString, "base_url": candidate.baseURL, "model": candidate.model, "issues": issue, "verified": candidate.check?.state == .valid, "models_count": candidate.modelCatalog?.models.count ?? 0]
     }
     static func structuredNotes(_ sections: [String: Any]) -> String {
         var seen = Set<String>()
-        return [("access", "接入要点"), ("limits", "使用限制"), ("pending", "待确认")].compactMap { key, title in
-            let lines = (sections[key] as? [String] ?? []).map { $0.trimmed }.filter { !$0.isEmpty && seen.insert($0).inserted }
-            return lines.isEmpty ? nil : "【" + title + "】\n" + lines.map { "• " + $0 }.joined(separator: "\n")
-        }.joined(separator: "\n\n")
+        return ["access", "limits", "pending"].flatMap { key in
+            (sections[key] as? [String] ?? []).compactMap { value -> String? in
+                let line = value.trimmed
+                let identity = line.trimmingCharacters(in: CharacterSet(charactersIn: "。；;.!！ "))
+                guard !line.isEmpty, seen.insert(identity).inserted else { return nil }
+                return key == "pending" && !line.hasPrefix("待确认") ? "待确认：" + line : line
+            }
+        }.joined(separator: "\n")
     }
     func verify(_ args: [String: Any]) async throws -> [String: Any] {
         guard let id = args["id"] as? String, let index = candidates.firstIndex(where: { $0.id.uuidString.caseInsensitiveCompare(id) == .orderedSame }) else { throw KeyDockError.message("请先创建候选，再使用返回的编号验证。") }
@@ -198,10 +220,20 @@ struct AgentImportResult {
         for field in ["body", "headers"] { if let value = args[field] as? String { restored[field] = redacted.restore(value) } }
         let (request, template) = try AgentVerification.request(candidate, arguments: restored)
         if let body = request.httpBody, safe(String(decoding: body, as: UTF8.self)) != String(decoding: body, as: UTF8.self) { throw KeyDockError.message("验证正文包含敏感片段，请使用文档指定的 Header 鉴权。") }
-        let (data, response) = try await AgentVerification.boundedData(for: request, session: session, limit: 1_048_576)
+        let data: Data, response: HTTPURLResponse
+        do { (data, response) = try await AgentVerification.boundedData(for: request, session: session, limit: 1_048_576) }
+        catch {
+            let message = safe(APIClient.failureMessage(error))
+            candidate.check = CheckResult(state: .uncertain, message: message, endpoint: request.url?.absoluteString ?? "", requestMethod: request.httpMethod, request: CheckedRequest(request))
+            candidates[index] = candidate
+            diagnostic?("验证请求未完成", CheckedRequest(request).curl + "\n" + message)
+            throw error
+        }
         try Task.checkCancellation()
         var check = AgentVerification.classify(data, response: response, record: candidate, method: request.httpMethod ?? "GET", endpoint: request.url?.absoluteString ?? "")
         check.request = CheckedRequest(request)
+        let responseHeaders = Dictionary(response.allHeaderFields.map { (String(describing: $0.key), String(describing: $0.value)) }, uniquingKeysWith: { a, _ in a })
+        diagnostic?("验证结果 · HTTP \(response.statusCode)", CheckedRequest(request).curl + "\n\n" + RecordedContent.headers(responseHeaders) + "\n\n" + String(decoding: data.prefix(12000), as: UTF8.self))
         candidate.check = check
         if check.state == .valid, let template {
             guard safe(template.body) == template.body else { throw KeyDockError.message("调用示例含真实敏感片段，请改用 Header 鉴权，不在正文中嵌入密钥。") }
@@ -219,8 +251,13 @@ struct AgentImportResult {
     func fetchDocument(_ address: String) async throws -> [String: Any] {
         guard documents.count < 8 else { throw KeyDockError.message("本次已获取多份文档，请先使用现有资料完成任务。") }
         guard safe(address) == address else { throw KeyDockError.message("文档地址中包含敏感片段，不会发送。") }
-        let known = Set(ImportParser.urls(in: source) + providerReferences.flatMap(\.docs))
-        guard known.contains(address) else { throw KeyDockError.message("请只读取用户资料或已获取文档中实际出现的链接，不猜测文档地址。") }
+        func canonical(_ value: String) -> String {
+            guard var parts = URLComponents(string: value) else { return value }
+            if parts.path.isEmpty { parts.path = "/" }
+            return parts.string ?? value
+        }
+        let known = Set((ImportParser.urls(in: source) + providerReferences.flatMap(\.docs)).map(canonical))
+        guard known.contains(canonical(address)) else { throw KeyDockError.message("请只读取用户资料或已获取文档中实际出现的链接，不猜测文档地址。") }
         if let file = documents[address] { return ["ok": true, "path": file, "cached": true] }
         var url = try documentURL(address)
         for attempt in 0..<8 {
@@ -278,7 +315,28 @@ struct AgentImportResult {
 
 @MainActor enum ImportAgent {
     static func run(raw: String, reviewedText: String? = nil, service: Credential, model: String, images: [ImportImage], session: URLSession = APIClient.session,
-                    allowLocalDocuments: Bool = false, interaction: AgentInteraction? = nil, onSupplement: @escaping (ImportPaste) -> Void = { _ in }, progress: @escaping (String) -> Void) async throws -> AgentImportResult {
+                    promptConfiguration: AgentPromptConfiguration = .init(), allowLocalDocuments: Bool = false, interaction: AgentInteraction? = nil, onSupplement: @escaping (ImportPaste) -> Void = { _ in }, progress: @escaping (String) -> Void) async throws -> AgentImportResult {
+        let service = ProviderPreset.configuration(service.usingModel(model))
+        try Task.checkCancellation()
+        let runID = interaction?.begin()
+        interaction?.activity.begin(raw: raw, service: service, model: model)
+        defer { interaction?.supplement = nil }
+        do {
+            let result = try await execute(raw: raw, reviewedText: reviewedText, service: service, model: model, images: images, session: session, promptConfiguration: promptConfiguration, allowLocalDocuments: allowLocalDocuments, interaction: interaction, onSupplement: onSupplement, progress: progress)
+            interaction?.postCompletion(summary: result.summary, reply: result.reply, runID: runID)
+            interaction?.activity.finish("completed", detail: result.summary)
+            if let runID { interaction?.finishRun(runID) }
+            return result
+        } catch {
+            let message = interaction?.activity.safe(error.localizedDescription) ?? "整理未完成。"
+            if Task.isCancelled || error is CancellationError {
+                if let runID { interaction?.finishRun(runID, cancelled: true) }
+            } else if interaction?.runID == runID, interaction?.failure == nil { interaction?.fail(message, runID: runID) }
+            throw error
+        }
+    }
+    private static func execute(raw: String, reviewedText: String?, service: Credential, model: String, images: [ImportImage], session: URLSession,
+                    promptConfiguration: AgentPromptConfiguration, allowLocalDocuments: Bool, interaction: AgentInteraction?, onSupplement: @escaping (ImportPaste) -> Void, progress: @escaping (String) -> Void) async throws -> AgentImportResult {
         let service = ProviderPreset.configuration(service)
         guard service.kind != .custom, !model.trimmed.isEmpty else { throw KeyDockError.message("请选择支持工具调用的可信模型。") }
         if let issue = service.connectionIssue { throw KeyDockError.message("整理服务：" + issue) }
@@ -287,17 +345,38 @@ struct AgentImportResult {
         guard raw.utf8.count <= 100_000 else { throw KeyDockError.message("请将输入文字控制在 100 KB 以内。") }
         guard (reviewedText?.utf8.count ?? 0) <= 100_000 else { throw KeyDockError.message("发送预览中的文字不能超过 100 KB。") }
         try ImportImage.validate(images)
-        interaction?.begin()
+        interaction?.activity.note("准备资料与运行环境", detail: "图片：\(images.count) 张")
         let resources = try AgentWorker.resources()
+        let systemPrompt = try promptConfiguration.load(runtime: resources.runtime)
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-Agent-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: workspace) }
         let imageText = try await ImportImage.recognizedText(in: images)
         let host = ImportAgentHost(original: raw, imageText: imageText, images: images, workspace: workspace, session: session)
+        let runID = interaction?.runID
+        let activityRecordID = interaction?.activity.record.id
         host.organizerSecret = service.apiKey
         host.organizerOtherSecrets = service.secretValues
         host.allowLocalDocuments = allowLocalDocuments
-        let privateProxy = LocalProxy(port: 0); privateProxy.update([service]); privateProxy.start()
+        interaction?.activity.addSecrets(Array(host.redacted.keys.values))
+        if !imageText.isEmpty { interaction?.activity.note("图片文字索引", detail: imageText) }
+        host.diagnostic = { [weak host, weak interaction] title, detail in
+            guard let host, interaction?.runID == runID, interaction?.activity.record.id == activityRecordID else { return }
+            interaction?.activity.addSecrets(Array(host.redacted.keys.values) + host.candidates.flatMap(\.secretValues))
+            interaction?.activity.note(title, detail: detail, diagnosticOnly: true)
+        }
+        let privateProxy = LocalProxy(port: 0)
+        var modelRequests = 0
+        privateProxy.recordHistory(captureBodies: [service.id]) { [weak interaction] entry in
+            Task { @MainActor in
+                guard let activity = interaction?.activity, activity.active, activity.record.id == activityRecordID else { return }
+                let requestBody = AgentLogContent.modelRequest(entry.requestBody, includeHistory: modelRequests == 0)
+                modelRequests += 1
+                let detail = entry.method + " " + entry.requestURL + "\n模型：" + entry.model + "\n耗时：" + String(format: "%.2f 秒", entry.duration) + "\n请求：\n" + requestBody + ((entry.status ?? 0) >= 300 ? "\n错误响应：\n" + entry.responseBody : "")
+                activity.note("整理模型请求 · HTTP " + (entry.status.map(String.init) ?? "未完成"), detail: detail, state: entry.succeeded ? "completed" : "failed", diagnosticOnly: true)
+            }
+        }
+        privateProxy.update([service]); privateProxy.start()
         defer { privateProxy.stop() }
         for _ in 0..<200 { if privateProxy.running { break }; try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(10)) }
         guard let port = privateProxy.listeningPort, privateProxy.running else { throw KeyDockError.message("无法建立本机 Agent 连接。") }
@@ -318,11 +397,35 @@ struct AgentImportResult {
                 // Reviewed text can only reduce context, never restore real known secrets.
                 text = text.replacingSecrets(Dictionary(host.redacted.keys.map { ($0.value, $0.key) }, uniquingKeysWith: { a, _ in a }))
                 if !service.apiKey.isEmpty { text = text.replacingOccurrences(of: service.apiKey, with: "[整理服务密钥已隐藏]") }
-                try await worker.send(["type": "start", "task": "整理这些服务凭据。根据实际资料自行规划，充分阅读相关接口文档，必要时编写并运行代码，修正配置并完成真实验证，最后提交可供确认的结果。",
+                if let interaction {
+                    var context = interaction.messages.suffix(16).map { ($0.isUser ? "用户：" : "助手：") + String($0.text.prefix(4000)) }.joined(separator: "\n\n")
+                    if let recovery = interaction.recovery {
+                        context += "\n上次候选（供定位，不替代当前配置的必要核验）：\n" + recovery.records.map { "名称：" + $0.title + "；地址：" + $0.baseURL + "；模型：" + $0.model + "；协议：" + $0.inferenceKind.protocolTitle }.joined(separator: "\n")
+                    }
+                    let logContext = String(context.suffix(32000))
+                    context = host.safe(logContext)
+                    if !context.isEmpty {
+                        interaction.activity.note("会话上下文", detail: logContext, diagnosticOnly: true)
+                        text += "\n\n此前同一整理任务的对话，仅用于理解补充要求，不能作为新密钥或新地址的来源证据：\n" + context
+                    }
+                }
+                try await worker.send(["type": "start", "systemPrompt": systemPrompt,
                                        "text": text, "providerReferences": host.providerReferences.map(\.reference), "service": ["kind": service.kind.rawValue, "model": model, "baseURL": "http://127.0.0.1:\(port)/s/" + service.routeID, "alias": service.localKey, "requiresOutputLimit": APIClient.requiresOutputLimit(service, path: service.kind == .anthropic ? "messages" : ""),
                                                                    "providerHint": ["api.deepseek.com": "deepseek", "api.moonshot.cn": "moonshot", "api.moonshot.ai": "moonshot", "api.openai.com": "openai"][URL(string: service.baseURL)?.host?.lowercased() ?? ""] ?? "keydock"],
                                        "images": images.map { ["type": "image", "data": $0.data.base64EncodedString(), "mimeType": $0.mimeType] }])
                 var settled = false, finalReply = ""
+                var toolArguments: [String: String] = [:]
+                interaction?.supplement = { [weak interaction] paste in
+                    guard let interaction, interaction.activity.active else { throw KeyDockError.message("本次整理已结束，请重新发送。") }
+                    let addition = try await host.supplement(paste)
+                    interaction.activity.addSecrets(Array(host.redacted.keys.values))
+                    try Task.checkCancellation()
+                    guard interaction.activity.active else { throw KeyDockError.message("本次整理已结束，补充内容仍保留。") }
+                    host.finished = false
+                    try await worker.send(["type": "supplement", "text": host.safe(addition.0), "images": addition.1.map { ["type":"image", "data":$0.data.base64EncodedString(), "mimeType":$0.mimeType] }])
+                    onSupplement(paste)
+                    interaction.activity.note("已发送补充资料", detail: addition.0)
+                }
                 @MainActor func ask(_ question: AgentQuestion) async throws -> (String, [ImportImage])? {
                     guard let interaction else { throw KeyDockError.message(question.question) }
                     host.activity.append("Agent：" + question.question + (question.reason.isEmpty ? "" : "\n" + question.reason))
@@ -338,7 +441,25 @@ struct AgentImportResult {
                     try Task.checkCancellation()
                     guard let message = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], let type = message["type"] as? String else { throw KeyDockError.message("Agent 返回了无法识别的内容。") }
                     switch type {
-                    case "progress": let label = message["label"] as? String ?? "正在处理"; progress(label)
+                    case "progress":
+                        let label = message["label"] as? String ?? "正在处理"; progress(label)
+                        interaction?.activity.phase("running")
+                        if message["turn"] != nil { interaction?.activity.note(label, diagnosticOnly: true) }
+                    case "activity":
+                        let id = message["id"] as? String ?? UUID().uuidString
+                        if let args = message["detail"] as? String { toolArguments[id] = args }
+                        let output = message["output"] as? String ?? ""
+                        var state = message["state"] as? String ?? "info"
+                        if let result = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any], result["ok"] as? Bool == false { state = "failed" }
+                        interaction?.activity.addSecrets(Array(host.redacted.keys.values) + host.candidates.flatMap(\.secretValues))
+                        let tool = message["tool"] as? String ?? ""
+                        interaction?.activity.update(id: id, title: (message["label"] as? String ?? message["tool"] as? String ?? "执行步骤") + " · " + tool, detail: (toolArguments[id] ?? "") + (output.isEmpty ? "" : "\n输出：\n" + output), state: state, summary: AgentLogContent.toolSummary(tool, arguments: toolArguments[id] ?? "", output: output, failed: state == "failed"))
+                    case "narration":
+                        let text = host.safe(message["text"] as? String ?? "")
+                        interaction?.postReply(text, runID: runID); interaction?.activity.note("Agent 回复", detail: text, diagnosticOnly: true)
+                    case "runtime_diagnostic":
+                        let detail = message["message"] as? String ?? ""
+                        interaction?.activity.note("运行时诊断", detail: detail.contains("data:image") || detail.contains("base64") ? "诊断包含附件数据，已省略。" : host.safe(detail))
                     case "host_tool":
                         let name = message["name"] as? String ?? "", args = message["args"] as? [String: Any] ?? [:]
                         let result: [String: Any]
@@ -377,6 +498,10 @@ struct AgentImportResult {
             } onCancel: { worker.requestCancel() }
         } catch {
             await worker.shutdown()
+            if let interaction {
+                let retained = host.reviewResult(reply: interaction.lastReply?.question ?? "")
+                if !retained.records.isEmpty { interaction.recovery = retained }
+            }
             if !Task.isCancelled && !(error is CancellationError) {
                 let message = host.safe((error as? KeyDockError)?.localizedDescription ?? "整理连接意外中断，资料已保留。")
                 var result = host.reviewResult(reply: interaction?.lastReply?.question ?? "")

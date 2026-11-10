@@ -9,6 +9,8 @@ trap 'rm -rf "$TASK_PACKAGE"' EXIT
 TASK_APP="$TASK_PACKAGE/KeyDock.app"
 mkdir -p "$TASK_APP/Contents/MacOS" "$TASK_APP/Contents/Resources"
 cp "$TASK_BIN/KeyDock" "$TASK_APP/Contents/MacOS/KeyDock"
+# NSAllowsLocalNetworking would override NSAllowsArbitraryLoads on current
+# macOS, blocking user-supplied HTTP gateways with NSURLErrorDomain -1022.
 cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -18,12 +20,12 @@ cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>local.keydock.app</string>
   <key>CFBundleExecutable</key><string>KeyDock</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>23</string>
-  <key>CFBundleShortVersionString</key><string>1.3.16</string>
+  <key>CFBundleVersion</key><string>31</string>
+  <key>CFBundleShortVersionString</key><string>1.3.24</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsArbitraryLoads</key><true/></dict>
   <key>NSHumanReadableCopyright</key><string>KeyDock · 本地密钥管理</string>
 </dict></plist>
 PLIST

@@ -32,14 +32,18 @@ struct SheetShortcuts: NSViewRepresentable {
         init(close: @escaping () -> Void, cancel: (() -> Void)? = nil) {
             self.close = close; self.cancel = cancel; super.init(frame: .zero)
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, self.handles(event) else { return event }
-                // Esc 沿用页面的取消 / 停止行为，⌘W 始终关闭顶层弹框。
-                if event.keyCode == 53 { (self.cancel ?? self.close)() }
-                else { self.close() }
-                return nil
+                self?.consume(event) == true ? nil : event
             }
         }
         required init?(coder: NSCoder) { fatalError() }
+        @discardableResult func consume(_ event: NSEvent) -> Bool {
+            guard handles(event) else { return false }
+            if !event.isARepeat {
+                if event.keyCode == 53 { (cancel ?? close)() }
+                else { close() }
+            }
+            return true
+        }
         func handles(_ event: NSEvent) -> Bool {
             guard let window, event.window === window, window.attachedSheet == nil,
                   NSApp.modalWindow == nil || NSApp.modalWindow === window else { return false }

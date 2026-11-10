@@ -98,8 +98,8 @@ final class RequestTests: TestSuite {
         expectEqual(request.value(forHTTPHeaderField: "x-goog-api-key"), value.apiKey)
         expectNil(request.url?.query)
     }
-    func testRejectsInsecureRemoteAndHeaderInjection() {
-        expectThrows(try APIClient.verificationRequest(for: record("http://remote.example.com")))
+    func testRejectsUnsupportedSchemesAndHeaderInjection() {
+        expectTrue((try? APIClient.verificationRequest(for: record("http://remote.example.com"))) != nil)
         expectThrows(try APIClient.verificationRequest(for: record("https://user:password@api.example.com")))
         var value = record(); value.extraHeaders = "Host: attacker.example.com"
         expectThrows(try APIClient.verificationRequest(for: value))
@@ -203,13 +203,14 @@ final class ProxyTests: TestSuite {
         record.archived = false; record.expiresAt = Date(timeIntervalSince1970: 0)
         expectThrows(try request(record).upstream(records: [record]))
     }
-    func testHTTPFramingAndChunkedUploadRejection() throws {
+    func testHTTPFramingAndChunkedUploads() throws {
         let partial = Data("POST /s/test/models HTTP/1.1\r\nContent-Length: 5\r\n\r\n123".utf8)
         expectNil(try LocalHTTPRequest.parse(partial))
         let full = partial + Data("45".utf8)
         expectEqual(try LocalHTTPRequest.parse(full)?.body, Data("12345".utf8))
         expectThrows(try LocalHTTPRequest.parse(Data("POST / HTTP/1.1\r\nContent-Length: 1\r\ncontent-length: 2\r\n\r\n12".utf8)))
-        expectThrows(try LocalHTTPRequest.parse(Data("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".utf8)))
+        expectNil(try LocalHTTPRequest.parse(Data("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n".utf8)))
+        expectEqual(try LocalHTTPRequest.parse(Data("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nOK\r\n0\r\n\r\n".utf8))?.body, Data("OK".utf8))
         expectThrows(try LocalHTTPRequest.parse(Data("POST / HTTP/1.1\r\nContent-Length: 9999999999\r\n\r\n".utf8)))
     }
 }

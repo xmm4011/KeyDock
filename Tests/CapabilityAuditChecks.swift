@@ -136,6 +136,8 @@ import CryptoKit
         session.invalidateAndCancel(); checkpoint("CapabilityAudit.balance-errors-preserve-actionable-service-reasons")
     }
     static func organizerTemplate() async {
+        let promptDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("KeyDock-AuditPrompts-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: promptDirectory) }
         func event(_ value: [String: Any]) -> String { "data: " + String(decoding: try! JSONSerialization.data(withJSONObject: value), as: UTF8.self) + "\n\n" }
         let item: [String: Any] = ["id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed", "content": [["type": "output_text", "text": "需要确认部署 ID。", "annotations": []]]]
         let final: [String: Any] = ["id": "resp_fixture", "object": "response", "status": "completed", "created_at": 1, "model": "fixture-model", "output": [item], "usage": ["input_tokens": 1, "output_tokens": 1, "total_tokens": 2]]
@@ -150,7 +152,7 @@ import CryptoKit
             var service = DeepChecks.record(); service.baseURL = "http://127.0.0.1:\(try unwrap(server.port))/organizer/v1"; service.model = "fixture-model"
             service.callTemplate = ModelCallTemplate(path: "responses", body: #"{"model":"fixture-model","input":"Hi"}"#, model: service.model)
             let interaction = AgentInteraction()
-            let task = Task { try await ImportAgent.run(raw: "资料中的模型部署 ID 需要确认。", service: service, model: service.model, images: [], interaction: interaction, progress: { _ in }) }
+            let task = Task { try await ImportAgent.run(raw: "资料中的模型部署 ID 需要确认。", service: service, model: service.model, images: [], promptConfiguration: .init(directory: promptDirectory), interaction: interaction, progress: { _ in }) }
             for _ in 0..<400 {
                 if interaction.question != nil || interaction.failure != nil { break }
                 try await Task.sleep(for: .milliseconds(10))

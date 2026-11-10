@@ -81,12 +81,17 @@ struct StatusBadge: View {
 
 struct CodePanel: View {
     let text: String
+    @EnvironmentObject private var store: VaultStore
     var body: some View {
+        if text.utf8.count > 32768 {
+            PreparedCodePanel(contents: [.text(text)], policy: .init(fullContent: true, secrets: []), onCopy: { store.copy($0, sensitive: true) })
+        } else {
         ScrollView(.horizontal) {
             Text(text).font(.system(size: 12, design: .monospaced)).lineSpacing(5).textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(14)
         }.background(Color(red: 0.955, green: 0.959, blue: 0.98), in: RoundedRectangle(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(Palette.border, lineWidth: 1))
+        }
     }
 }
 

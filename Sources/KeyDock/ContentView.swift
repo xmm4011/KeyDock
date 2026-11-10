@@ -36,19 +36,8 @@ struct ContentView: View {
     private var mainCommandsAvailable: Bool {
         sheet == nil && windowContext.allowsMainCommands
     }
-    var visible: [Credential] {
-        let results: [(record: Credential, match: CredentialSearchMatch)] = store.credentials.compactMap { item in
-            let matches = shelf == .archived ? item.archived : !item.archived && (shelf != .favorites || item.favorite)
-            guard matches, let match = item.searchMatch(for: search) else { return nil }
-            return (item, match)
-        }
-        return results.sorted {
-            if $0.match.rank != $1.match.rank { return $0.match.rank < $1.match.rank }
-            if $0.record.favorite != $1.record.favorite { return $0.record.favorite }
-            if $0.record.updatedAt != $1.record.updatedAt { return $0.record.updatedAt > $1.record.updatedAt }
-            return $0.record.id.uuidString < $1.record.id.uuidString
-        }.map(\.record)
-    }
+    private var projection: CredentialListProjection { store.listing(shelf: shelf, search: search) }
+    var visible: [Credential] { projection.records }
     var body: some View {
         VStack(spacing: 20) {
             header
@@ -136,7 +125,7 @@ struct ContentView: View {
                 ScrollViewReader { proxy in
                     ScrollView { LazyVStack(spacing: 10) {
                         ForEach(visible) { record in
-                            Button { store.selectedID = record.id; focusResults() } label: { CredentialCard(record: record, selected: store.selectedID == record.id, checking: store.checking.contains(record.id), searchHint: record.searchMatch(for: search)?.detail) }.buttonStyle(.plain)
+                            Button { store.selectedID = record.id; focusResults() } label: { CredentialCard(record: record, selected: store.selectedID == record.id, checking: store.checking.contains(record.id), searchHint: projection.hints[record.id]) }.buttonStyle(.plain)
                                 .id(record.id)
                                 .modifier(CredentialContextActions(record: record, edit: { guard sheet == nil else { return }; sheet = .editor(record) }))
                         }

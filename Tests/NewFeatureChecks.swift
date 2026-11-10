@@ -257,10 +257,10 @@ import CryptoKit
                     entry.status = 200; entry.inputTokens = 2; entry.outputTokens = 3; entry.requestBody = "private business fixture"
                     history.append(entry)
                 }
-                history.flush(); expectEqual(history.entries.count, 100); expectEqual(history.totals[id]?.calls, 105); expectEqual(history.totals[id]?.input, 210)
+                history.flush(); expectEqual(history.entries.count, 105); expectEqual(history.totals[id]?.calls, 105); expectEqual(history.totals[id]?.input, 210)
                 let bytes = try Data(contentsOf: history.fileURL); expectFalse(String(decoding: bytes, as: UTF8.self).contains("private business fixture"))
                 expectEqual(try FileManager.default.attributesOfItem(atPath: history.fileURL.path)[.posixPermissions] as? Int, 0o600)
-                let restored = ProxyHistory(directory: root, keyProvider: { key }); expectEqual(restored.entries.count, 100); expectEqual(restored.totals[id]?.calls, 105); expectTrue(restored.captureBodies.contains(id))
+                let restored = ProxyHistory(directory: root, keyProvider: { key }); expectEqual(restored.entries.count, 105); expectEqual(restored.totals[id]?.calls, 105); expectTrue(restored.captureBodies.contains(id))
                 restored.clear(id); restored.flush(); expectTrue(restored.entries.isEmpty); expectNil(restored.totals[id])
             }
         }
@@ -371,7 +371,7 @@ import CryptoKit
             let response = try await session.data(for: request)
             expectEqual((response.1 as? HTTPURLResponse)?.statusCode, 200); expectTrue(String(decoding: response.0, as: UTF8.self).contains(secret))
             for _ in 0..<100 { if history.entries.count == 1 { break }; try await Task.sleep(for: .milliseconds(10)) }
-            let entry = try unwrap(history.entries.first)
+            let entry = try history.detail(for: unwrap(history.entries.first))
             expectEqual(entry.inputTokens, 10); expectEqual(entry.outputTokens, 3); expectEqual(entry.totalTokens, 13)
             expectTrue(entry.bodiesCaptured); expectTrue(entry.requestBody.contains(secret)); expectTrue(entry.responseBody.contains(secret)); expectTrue(entry.requestHeaders.contains(secret)); expectTrue(entry.responseHeaders.contains(secret))
             expectEqual(provider.received.first?.body, request.httpBody); checkpoint("Feature.real-proxy-history-captures-original-values-and-tokens-without-changing-wire-data")

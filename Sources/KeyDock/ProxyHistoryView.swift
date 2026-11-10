@@ -9,6 +9,10 @@ struct ProxyHistoryPanel: View {
     @State private var selected: ProxyLogEntry?
     @State private var confirmClear = false
     @State private var showScope = false
+    @State private var page = 0
+    @State private var pageInput = "1"
+    private var pageCount: Int { max(1, (entries.count + ProxyHistory.pageSize - 1) / ProxyHistory.pageSize) }
+    private var visibleEntries: [ProxyLogEntry] { Array(entries.dropFirst(min(page, pageCount - 1) * ProxyHistory.pageSize).prefix(ProxyHistory.pageSize)) }
     var entries: [ProxyLogEntry] { history.entries.filter { $0.credentialID == credentialID } }
     var totals: ProxyTotals { history.totals[credentialID] ?? ProxyTotals() }
     var body: some View {
@@ -26,7 +30,7 @@ struct ProxyHistoryPanel: View {
                     }
                         .buttonStyle(.plain).foregroundStyle(Palette.muted).accessibilityLabel("统计与记录范围")
                         .popover(isPresented: $showScope) {
-                            Text("不是官方账单。只记录服务返回的 usage，缺失用量不估算，部分用量以 + 标识。\n\n全库保留最近 100 条明细、最多约 8 MB；明细淘汰不影响累计统计。每段正文最多 128 KB，内容仅在本机加密保存，是否显示完整内容由系统设置控制。")
+                            Text("不是官方账单。只记录服务返回的 usage，缺失用量不估算，部分用量以 + 标识。\n\n全库保留最近 5000 条调用，每页 10 条；淘汰不影响累计统计。每段正文最多 2 MB，单独压缩加密保存、按需读取。旧版已截断或未记录的内容无法补回。显示和复制遵循系统设置中的完整内容开关。")
                                 .font(.system(size: 12)).lineSpacing(5).padding(20).frame(width: 320)
                         }
                     Spacer(minLength: 0)
@@ -63,16 +67,33 @@ struct ProxyHistoryPanel: View {
                 }.frame(maxWidth: .infinity).padding(.vertical, 26)
             } else {
                 LazyVStack(spacing: 10) {
-                    ForEach(entries) { entry in
+                    ForEach(visibleEntries) { entry in
                         Button { selected = entry } label: { historyRow(entry) }.buttonStyle(.plain)
                     }
                 }
+                pagination
             }
         }
+        .onChange(of: credentialID) { page = 0; pageInput = "1" }
+        .onChange(of: entries.count) { page = min(page, pageCount - 1) }
+        .onChange(of: page) { pageInput = String(page + 1) }
         .sheet(item: $selected) { entry in ProxyLogView(entry: entry) }
         .alert("清空此 Key 的调用记录与统计？", isPresented: $confirmClear) {
             Button("取消", role: .cancel) {}; Button("清空", role: .destructive) { history.clear(credentialID) }
         } message: { Text("密钥及其他 Key 的记录不受影响。") }
+    }
+    private var pagination: some View {
+        HStack {
+            Text("第").font(.system(size: 12)).foregroundStyle(Palette.muted)
+            TextField("页码", text: $pageInput).frame(width: 42).textFieldStyle(.roundedBorder).accessibilityLabel("跳转页码")
+                .onSubmit { page = min(pageCount - 1, max(0, (Int(pageInput) ?? (page + 1)) - 1)); pageInput = String(page + 1) }
+            Text("/ \(pageCount) 页 · 每页 10 条").font(.system(size: 12)).foregroundStyle(Palette.muted)
+            Spacer()
+            Button("首页") { page = 0 }.disabled(page == 0)
+            Button("上一页") { page = max(0, page - 1) }.disabled(page == 0)
+            Button("下一页") { page = min(pageCount - 1, page + 1) }.disabled(page + 1 >= pageCount)
+            Button("末页") { page = pageCount - 1 }.disabled(page + 1 >= pageCount)
+        }
     }
     private func historyRow(_ entry: ProxyLogEntry) -> some View {
         HStack(spacing: 13) {
@@ -110,34 +131,70 @@ struct ProxyLogView: View {
     let entry: ProxyLogEntry
     @Environment(\.dismiss) private var dismiss
     @State private var response = false
-    private var secrets: [String] { store.headerSecrets(entry.requestHeaders + "\n" + entry.responseHeaders) }
+    @State private var pretty = true
+    @State private var headersExpanded = false
+    @StateObject private var presentation = HTTPLogPresentation()
+    private var current: ProxyLogEntry { presentation.detail ?? entry }
+    private var policy: HTTPLogDisplayPolicy { store.logDisplayPolicy }
+    private var ready: Bool { presentation.policy == policy }
+    private var variant: HTTPLogVariant { .init(response: response, pretty: pretty) }
+    private var document: HTTPTextDocument? { ready ? presentation.documents[variant] : nil }
+    private var headers: String { ready ? (presentation.headers[response] ?? "") : "" }
     var body: some View {
         VStack(spacing: 0) {
             SheetHeader(title: "调用详情", subtitle: entry.startedAt.formatted(date: .abbreviated, time: .standard) + " · " + String(format: "%.2f 秒", entry.duration))
             Divider()
             VStack(alignment: .leading, spacing: 14) {
-                Text(store.displayText(entry.method + " " + entry.requestURL, additionalSecrets: secrets)).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                Text(ready ? presentation.requestLine : entry.method).font(.system(size: 11, design: .monospaced)).textSelection(.enabled).lineLimit(3)
                 HStack {
                     Text("状态：" + (entry.status.map(String.init) ?? "未完成"))
                     Text("输入：" + (entry.inputTokens.map(String.init) ?? "未获取"))
                     Text("输出：" + (entry.outputTokens.map(String.init) ?? "未获取"))
+                    Spacer()
+                    if let origin = entry.responseOrigin { Text(origin == "proxy" ? "代理生成响应" : "上游返回响应") }
                 }.font(.system(size: 11)).foregroundStyle(Palette.muted)
-                if let error = entry.error { Text(store.displayText(error, additionalSecrets: secrets)).font(.system(size: 12)).foregroundStyle(.orange) }
-                Picker("内容", selection: $response) { Text("Request").tag(false); Text("Response").tag(true) }.pickerStyle(.segmented)
-                if entry.bodiesCaptured {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Header").font(.system(size: 11)).foregroundStyle(Palette.muted)
-                            CodePanel(text: store.displayHeaders(response ? entry.responseHeaders : entry.requestHeaders, additionalSecrets: secrets))
-                            Text("Body").font(.system(size: 11)).foregroundStyle(Palette.muted)
-                            CodePanel(text: store.displayText((response ? entry.responseBody : entry.requestBody).isEmpty ? "（空正文）" : (response ? entry.responseBody : entry.requestBody), additionalSecrets: secrets))
-                            if response ? entry.responseTruncated : entry.requestTruncated { Text("内容较大，仅记录前 128 KB。").font(.system(size: 11)).foregroundStyle(.orange) }
-                        }
+                if ready, let error = presentation.failureMessage { Text(error).font(.system(size: 12)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
+                HStack(spacing: 16) {
+                    Picker("内容", selection: $response) { Text("Request").tag(false); Text("Response").tag(true) }.pickerStyle(.segmented).frame(width: 240)
+                    Spacer()
+                    Button(response ? "复制响应" : "复制请求") {
+                        guard let document else { return }
+                        let firstLine = response ? "HTTP " + (entry.status.map(String.init) ?? "未完成") : presentation.requestLine
+                        store.copy(firstLine + "\n" + (headers.isEmpty ? "" : headers + "\n\n") + document.text, sensitive: true)
+                    }.disabled(document == nil || current.detailsUnavailable != nil || !current.bodiesCaptured)
+                }
+                if ready, let loadError = presentation.error {
+                    ContentUnavailableView("正文暂时无法读取", systemImage: "doc.text", description: Text(loadError))
+                } else if let reason = current.detailsUnavailable {
+                    ContentUnavailableView("本次仅保留调用摘要", systemImage: "doc.text", description: Text(reason))
+                } else if presentation.detail == nil { ProgressView("正在读取正文…").frame(maxWidth: .infinity, maxHeight: .infinity) }
+                else if current.bodiesCaptured {
+                    DisclosureGroup(isExpanded: $headersExpanded) {
+                        HTTPBodyTextView(text: headers.isEmpty ? "（无 Header）" : headers, onCopy: { store.copy($0, sensitive: true) }).frame(height: 104).background(Palette.canvas, in: RoundedRectangle(cornerRadius: 8))
+                    } label: { Text("Header").font(.system(size: 12)).foregroundStyle(Palette.muted) }
+                    HStack {
+                        Text("Body").font(.system(size: 12)).foregroundStyle(Palette.muted)
+                        Picker("正文显示", selection: $pretty) { Text("格式化").tag(true); Text("原文").tag(false) }.pickerStyle(.segmented).labelsHidden().frame(width: 140)
+                        Spacer()
+                        Button("复制正文") { if let document { store.copy(document.text, sensitive: true) } }.disabled(document == nil)
                     }
-                } else { ContentUnavailableView("这次未记录正文", systemImage: "doc.text", description: Text("在“记录”页开启“记录请求与响应正文”后，后续调用会保留 Header 和正文。")) }
-            }.padding(24)
+                    HTTPBodyViewport(documents: ready ? presentation.documents : [:], selected: variant, onCopy: { store.copy($0, sensitive: true) })
+                        .frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.canvas, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.border))
+                        .overlay { if document == nil { ProgressView("正在准备正文…") } }
+                    if let notice = document?.notice { Text(notice).font(.system(size: 11)).foregroundStyle(.orange) }
+                    if response ? current.responseTruncated : current.requestTruncated {
+                        let limit = (response ? current.responseBodyLimit : current.requestBodyLimit) ?? RecordedContent.bodyLimit
+                        Text("该次正文仅保留前 \(limit / 1024) KB，剩余内容未记录。JSON 片段按现有内容显示。")
+                            .font(.system(size: 11)).foregroundStyle(.orange)
+                    }
+                } else { ContentUnavailableView("这次未记录正文", systemImage: "doc.text", description: Text("开启记录请求与响应正文后，后续调用会保留 Header 和正文。")) }
+            }.padding(24).frame(maxHeight: .infinity)
             Divider()
-            HStack { Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }.padding(18)
-        }.frame(width: 760, height: 650)
+            HStack { Text("点击正文后可 ⌘A 全选、⌘C 复制").font(.system(size: 11)).foregroundStyle(Palette.muted); Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }.padding(18)
+        }.frame(minWidth: 720, idealWidth: 820, maxWidth: 1100, minHeight: 600, idealHeight: 720, maxHeight: 1000)
+            .onChange(of: variant) { presentation.preferred = variant }
+            .task(id: policy) { await presentation.load(entry, history: store.history, policy: policy) }
+            .onDisappear { presentation.cancel() }
     }
 }

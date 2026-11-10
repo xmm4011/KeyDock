@@ -40,15 +40,16 @@ struct ModelSelectionField: View {
         Credential.modelChoices(current: model, available: Credential.modelChoices(current: service?.model ?? "", available: (service?.manualModels ?? []) + loader.models))
     }
     var body: some View {
+        let choices = modelChoices
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 TextField("模型名称", text: $model, prompt: Text("填写模型 ID，或从右侧列表选择"))
                 Menu(loader.loading ? "获取中…" : "模型列表") {
                     Button(loader.models.isEmpty ? "获取模型列表" : "刷新模型列表") { loader.fetch() }.disabled(loader.loading)
-                    Button("复制模型列表") { store.copy(modelChoices.joined(separator: "\n")) }.disabled(modelChoices.isEmpty)
-                    if !modelChoices.isEmpty { Divider() }
-                    if loader.models.isEmpty && !modelChoices.isEmpty { Text("当前已配置模型") }
-                    ForEach(modelChoices, id: \.self) { name in
+                    Button("复制模型列表") { store.copy(choices.joined(separator: "\n")) }.disabled(choices.isEmpty)
+                    if !choices.isEmpty { Divider() }
+                    if loader.models.isEmpty && !choices.isEmpty { Text("当前已配置模型") }
+                    ForEach(choices, id: \.self) { name in
                         Button(store.displayText(name)) { model = name }
                             .disabled(service.flatMap { store.modelIssue(name, for: $0) } != nil)
                     }

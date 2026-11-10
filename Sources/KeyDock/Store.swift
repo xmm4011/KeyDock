@@ -4,7 +4,8 @@ import Combine
 
 @MainActor
 final class VaultStore: ObservableObject {
-    @Published private(set) var data = VaultData()
+    @Published private(set) var data = VaultData() { didSet { rendering.reset(data.credentials) } }
+    let rendering = CredentialRenderCache()
     @Published var loadError: String?
     @Published var error: String?
     @Published var toast: String?
@@ -27,7 +28,9 @@ final class VaultStore: ObservableObject {
     private let clipboardLifetime: Duration
     private var sensitiveChangeCount: Int?
     private var terminateObserver: NSObjectProtocol?
+    private var localeObserver: NSObjectProtocol?
     private var revision: VaultRevision?
+    var agentLogDirectory: URL { automaticProxy ? AgentActivity.defaultDirectory : disk.directory.appendingPathComponent("agent-logs", isDirectory: true) }
     var credentials: [Credential] { data.credentials }
     var selected: Credential? { data.credentials.first { $0.id == selectedID } }
     var active: [Credential] { credentials.filter { !$0.archived } }
@@ -35,11 +38,14 @@ final class VaultStore: ObservableObject {
     var showFullContent: Bool { data.showFullContent ?? false }
     var recordAllBodies: Bool { data.recordAllBodies ?? false }
     var capturedCredentialIDs: Set<UUID> { recordAllBodies ? Set(credentials.map(\.id)) : history.captureBodies }
+    var logDisplayPolicy: HTTPLogDisplayPolicy {
+        rendering.displayPolicy(credentials, full: showFullContent)
+    }
+    func listing(shelf: Shelf, search: String) -> CredentialListProjection { rendering.list(credentials, shelf: shelf, query: search) }
     @discardableResult func setShowFullContent(_ value: Bool) -> Bool { commit { $0.showFullContent = value } }
     @discardableResult func setRecordAllBodies(_ value: Bool) -> Bool { commit { $0.recordAllBodies = value } }
     func displayText(_ text: String, additionalSecrets: [String] = []) -> String {
-        let aliases = Set(credentials.map(\.localKey))
-        return showFullContent ? text : LogRedaction.text(text, secret: "", otherSecrets: (credentials.flatMap(\.secretValues) + additionalSecrets).filter { !aliases.contains($0) })
+        logDisplayPolicy.text(text, extra: additionalSecrets)
     }
     func headerSecrets(_ headers: String) -> [String] {
         var record = Credential(); record.extraHeaders = headers
@@ -62,7 +68,7 @@ final class VaultStore: ObservableObject {
     func configuredForUse(_ record: Credential) -> Credential {
         var value = ProviderPreset.configuration(record)
         if value.kind != .custom, value.model.trimmed.isEmpty, data.organizerServiceID == value.id, let model = data.organizerModel?.trimmed, !model.isEmpty { value.model = model }
-        let secrets = Set(credentials.flatMap(\.secretValues) + record.secretValues)
+        let secrets = Set(rendering.allSecrets(credentials) + record.secretValues)
         value.provider = value.provider.replacingSecrets(Dictionary(uniqueKeysWithValues: secrets.map { ($0, "SERVICE") }))
         if secrets.contains(where: { !value.variablePrefix.isEmpty && value.variablePrefix.range(of: $0, options: .caseInsensitive) != nil }) { value.variablePrefix = value.suggestedPrefix }
         return value
@@ -78,20 +84,18 @@ final class VaultStore: ObservableObject {
     }
     func modelIssue(_ model: String, for service: Credential) -> String? {
         if let issue = service.modelIssue(model) { return issue }
-        if credentials.flatMap(\.secretValues).contains(where: { model == $0 || ($0.count >= 8 && model.contains($0)) }) { return "模型名称中包含鉴权信息，请填写实际的模型 ID。" }
+        if rendering.allSecrets(credentials).contains(where: { model == $0 || ($0.count >= 8 && model.contains($0)) }) { return "模型名称中包含鉴权信息，请填写实际的模型 ID。" }
         return nil
     }
     func selectProtocol(_ kind: ServiceKind, for record: Credential) {
         guard let current = credentials.first(where: { $0.id == record.id }), current.updatedAt == record.updatedAt else { error = "此条目已更新，请重新选择协议。"; return }
         guard kind != .custom, current.kind != .custom, !current.archived else { return }
-        let changed = current.selectingProtocol(kind)
+        var changed = current.selectingProtocol(kind)
+        changed.restoreVerification(from: current)
         guard changed != current else { return }
         _ = commit { next in
             guard let index = next.credentials.firstIndex(where: { $0.id == current.id }) else { return }
             next.credentials[index] = changed
-            if current.inferenceKind != kind {
-                next.credentials[index].check = nil; next.credentials[index].connectionCheck = nil
-            }
             next.credentials[index].updatedAt = Date()
         }
     }
@@ -104,13 +108,13 @@ final class VaultStore: ObservableObject {
         if let issue = modelIssue(name, for: current) { error = issue; return false }
         guard name.rangeOfCharacter(from: .controlCharacters) == nil else { error = "模型 ID 不能包含换行或控制字符。"; return false }
         var value = current.selectingModel(name)
-        if adding {
+        if current.model != value.model {
             if !current.availableModels.contains(current.model) { value.rememberModel(current.model) }
-            value.rememberModel(name)
+            if !current.availableModels.contains(value.model) { value.rememberModel(value.model) }
         }
+        if adding { value.rememberModel(name) }
         guard value != current else { return true }
-        if current.model != value.model, current.check?.requestMethod == "POST" { value.check = nil }
-        if !current.hasSameConnection(as: value) || current.callTemplate != value.callTemplate { value.check = nil; value.connectionCheck = nil }
+        value.restoreVerification(from: current)
         value.updatedAt = Date()
         return commit { next in
             if let index = next.credentials.firstIndex(where: { $0.id == current.id }) { next.credentials[index] = value }
@@ -131,8 +135,11 @@ final class VaultStore: ObservableObject {
         terminateObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.clearSensitiveClipboard(); self?.history.flush() }
         }
+        localeObserver = NotificationCenter.default.addObserver(forName: NSLocale.currentLocaleDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { guard let self else { return }; self.rendering.reset(self.credentials); self.objectWillChange.send() }
+        }
     }
-    deinit { if let terminateObserver { NotificationCenter.default.removeObserver(terminateObserver) } }
+    deinit { if let terminateObserver { NotificationCenter.default.removeObserver(terminateObserver) }; if let localeObserver { NotificationCenter.default.removeObserver(localeObserver) } }
     func load() {
         do {
             let snapshot = try disk.loadSnapshot(); data = snapshot.data; revision = snapshot.revision; loadError = nil
@@ -195,7 +202,7 @@ final class VaultStore: ObservableObject {
         guard !record.name.isEmpty else { error = "请给这条 Key 起个名称。"; return false }
         guard !record.baseURL.isEmpty else { error = "请填写 Base URL。"; return false }
         guard record.baseURL.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/")).caseInsensitiveCompare(record.localBaseURL) != .orderedSame else { error = "这里应填写服务提供的 Base URL，不能填写此条目自己的本机接入地址。"; return false }
-        guard (try? APIClient.safeURL(record.baseURL)) != nil else { error = "Base URL 应为 HTTPS 完整地址；本机服务可使用 HTTP。"; return false }
+        guard (try? APIClient.safeURL(record.baseURL)) != nil else { error = "Base URL 应为 HTTP 或 HTTPS 完整地址。"; return false }
         guard !record.apiKey.isEmpty || record.auth == .none else { error = "请填写 API Key。"; return false }
         do {
             let base = try APIClient.safeURL(record.baseURL)
@@ -232,6 +239,10 @@ final class VaultStore: ObservableObject {
             let sameProviderKey = ProviderPreset.matching(record.baseURL) != nil && record.fingerprint == old.fingerprint
             let catalogChanged = old.verificationURL != record.verificationURL || ((authChanged || old.kind != record.kind || old.inferenceKind != record.inferenceKind) && !sameProviderKey)
             record.modelCatalog = catalogChanged ? nil : (old.modelCatalog ?? (old.availableModels.isEmpty ? nil : ModelCatalog(models: old.availableModels)))
+            let sameService = old.apiKey == record.apiKey && old.extraHeaders == record.extraHeaders && (old.baseURL == record.baseURL || sameProviderKey)
+            if sameService && (old.model != record.model || old.inferenceKind != record.inferenceKind) { record.restoreVerification(from: old) }
+            else if verificationChanged { record.verificationHistory = nil }
+            else { record.verificationHistory = old.verificationHistory }
             record.favorite = old.favorite; record.archived = old.archived; record.createdAt = old.createdAt
         }
         let success = commit { next in
@@ -269,7 +280,7 @@ final class VaultStore: ObservableObject {
     }
 
     func importRecords(_ values: [Credential]) -> Bool {
-        var added = 0, duplicate = 0
+        var added = 0, duplicate = 0, restoredImages = 0
         var addedID: UUID?, existingID: UUID?
         let success = commit { next in
             var seen = Set(next.credentials.map(\.fingerprint))
@@ -279,7 +290,14 @@ final class VaultStore: ObservableObject {
                 record.apiKey = record.apiKey.trimmed; record.baseURL = record.baseURL.trimmed; record.name = record.name.trimmed
                 record.rememberProtocol()
                 if let existing = next.credentials.first(where: { $0.localKey == record.apiKey.trimmed && $0.localBaseURL.caseInsensitiveCompare(record.baseURL.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))) == .orderedSame }) { duplicate += 1; existingID = existingID ?? existing.id; continue }
-                guard seen.insert(record.fingerprint).inserted else { duplicate += 1; existingID = existingID ?? next.credentials.first(where: { $0.fingerprint == record.fingerprint })?.id; continue }
+                guard seen.insert(record.fingerprint).inserted else {
+                    duplicate += 1
+                    if let index = next.credentials.firstIndex(where: { $0.fingerprint == record.fingerprint }) {
+                        existingID = existingID ?? next.credentials[index].id
+                        if next.credentials[index].fillMissingSourceImages(from: record) { restoredImages += 1 }
+                    }
+                    continue
+                }
                 while ids.contains(record.id) { record.id = UUID() }
                 record.variablePrefix = record.variablePrefix.trimmed.uppercased()
                 let requestedPrefix = record.envPrefix
@@ -296,7 +314,7 @@ final class VaultStore: ObservableObject {
         }
         if success {
             if let id = addedID ?? existingID { selectedID = id }
-            showToast(added == 0 && duplicate > 0 ? "Key 已存在，已定位已有条目" : "已导入 \(added) 条" + (duplicate > 0 ? "，跳过 \(duplicate) 条重复项" : ""))
+            showToast(added == 0 && duplicate > 0 ? (restoredImages > 0 ? "Key 已存在，已补回导入图片" : "Key 已存在，已定位已有条目") : "已导入 \(added) 条" + (duplicate > 0 ? "，跳过 \(duplicate) 条重复项" : ""))
         }
         return success
     }
@@ -373,6 +391,7 @@ final class VaultStore: ObservableObject {
     func queryBalance(_ record: Credential, session: URLSession = APIClient.session) async {
         guard !balanceChecking.contains(record.id) else { return }
         guard let current = credentials.first(where: { $0.id == record.id }), current.updatedAt == record.updatedAt else { error = "此条目已修改或删除，请重新选择后查询。"; return }
+        guard APIClient.balanceIssue(current) == nil else { return }
         balanceChecking.insert(record.id); defer { balanceChecking.remove(record.id) }
         do {
             let value = try await APIClient.balance(current, session: session)
@@ -436,7 +455,10 @@ final class VaultStore: ObservableObject {
             for var item in restored.credentials {
                 let originalID = item.id
                 guard fingerprints.insert(item.fingerprint).inserted else {
-                    restoredIDs[originalID] = next.credentials.first { $0.fingerprint == item.fingerprint }?.id
+                    if let index = next.credentials.firstIndex(where: { $0.fingerprint == item.fingerprint }) {
+                        restoredIDs[originalID] = next.credentials[index].id
+                        _ = next.credentials[index].fillMissingSourceImages(from: item)
+                    }
                     continue
                 }
                 if ids.contains(item.id) { item.id = UUID() }

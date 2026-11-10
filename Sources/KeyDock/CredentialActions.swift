@@ -16,6 +16,10 @@ struct CredentialMenuItems: View {
     let edit: () -> Void
     let archive: () -> Void
     let delete: () -> Void
+    private var verificationIssue: String? {
+        let configured = store.configuredForUse(record)
+        return (record.kind == .custom ? nil : store.modelIssue(configured.model, for: configured)) ?? APIClient.verificationIssue(configured, testModel: record.kind != .custom)
+    }
     var body: some View {
         Button("复制使用", systemImage: "doc.on.doc") { store.copy(store.configuredForUse(record).safeShareText) }
             .disabled(store.usageIssue(record) != nil).help(store.usageIssue(record) ?? "复制本机接入配置与调用示例")
@@ -24,7 +28,7 @@ struct CredentialMenuItems: View {
         Button("编辑…", systemImage: "square.and.pencil", action: edit)
         Button(record.verificationActionTitle + (record.kind == .custom ? "" : "（少量用量）"), systemImage: "arrow.clockwise") {
             Task { await store.verify(record, testModel: record.kind != .custom) }
-        }.disabled(record.archived || store.checking.contains(record.id) || (record.kind != .custom && (store.configuredForUse(record).connectionIssue != nil || store.modelIssue(store.configuredForUse(record).model, for: record) != nil)))
+        }.disabled(store.checking.contains(record.id) || verificationIssue != nil).help(verificationIssue ?? "验证当前配置")
         Divider()
         Button(record.archived ? "恢复此条目" : "归档此条目", systemImage: record.archived ? "arrow.uturn.backward" : "archivebox") {
             if record.archived { store.archive([record.id], archived: false) } else { archive() }

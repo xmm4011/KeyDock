@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum ServiceKind: String, Codable, CaseIterable, Identifiable {
     case compatible, anthropic, responses, gemini, custom
@@ -127,6 +128,13 @@ struct CredentialSearchMatch {
     var detail: String? = nil
 }
 
+struct StoredVerification: Codable, Equatable {
+    var check: CheckResult?
+    var connection: CheckResult?
+    var template: ModelCallTemplate?
+    var auth: AuthKind
+}
+
 struct Credential: Identifiable, Codable, Equatable {
     static let reservedVariablePrefixes = Set(["HOME", "PATH", "USER", "SHELL", "TMPDIR", "CODEX_HOME"])
     var id = UUID()
@@ -148,6 +156,13 @@ struct Credential: Identifiable, Codable, Equatable {
     var tags = ""
     var curl = ""
     var source = ""
+    var sourceImages: [ImportImage]?
+    mutating func fillMissingSourceImages(from incoming: Credential) -> Bool {
+        guard sourceImages?.isEmpty != false, let images = incoming.sourceImages, !images.isEmpty else { return false }
+        sourceImages = images
+        if source.isEmpty { source = incoming.source }
+        updatedAt = Date(); return true
+    }
     var verificationURL = ""
     var balanceURL = ""
     var balancePath = ""
@@ -162,6 +177,30 @@ struct Credential: Identifiable, Codable, Equatable {
     var updatedAt = Date()
     var check: CheckResult?
     var connectionCheck: CheckResult?
+    var verificationHistory: [String: StoredVerification]?
+    private var verificationIdentity: String {
+        let address = ProviderPreset.matching(baseURL).map { "provider:" + $0.id } ?? baseURL.trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let fields = [address, apiKey, extraHeaders, model, inferenceKind.rawValue, verificationURL]
+        return SHA256.hash(data: Data(fields.map { "\($0.utf8.count):\($0)" }.joined().utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    mutating func restoreVerification(from previous: Credential) {
+        guard verificationIdentity != previous.verificationIdentity else { return }
+        var history = previous.verificationHistory ?? [:]
+        if previous.check != nil || previous.connectionCheck != nil {
+            history[previous.verificationIdentity] = StoredVerification(check: previous.check, connection: previous.connectionCheck, template: previous.callTemplate, auth: previous.auth)
+        }
+        if history.count > 50 {
+            let ordered = history.sorted { ($0.value.check?.checkedAt ?? $0.value.connection?.checkedAt ?? .distantPast) > ($1.value.check?.checkedAt ?? $1.value.connection?.checkedAt ?? .distantPast) }
+            history = Dictionary(uniqueKeysWithValues: ordered.prefix(50).map { ($0.key, $0.value) })
+        }
+        verificationHistory = history
+        if let cached = history[verificationIdentity] {
+            check = cached.check; connectionCheck = cached.connection; callTemplate = cached.template; auth = cached.auth
+        } else {
+            check = previous.check?.requestMethod == "GET" && hasSameConnection(as: previous) ? previous.check : nil
+            connectionCheck = hasSameConnection(as: previous) ? previous.connectionCheck : nil
+        }
+    }
 
     var title: String { name.isEmpty ? (provider.isEmpty ? "未命名服务" : provider) : name }
     var inferenceKind: ServiceKind {
@@ -276,6 +315,10 @@ struct Credential: Identifiable, Codable, Equatable {
         value.rememberProtocol()
         return value
     }
+    func usingModel(_ name: String) -> Credential {
+        if modelProtocols?[name.trimmed] != nil { return selectingModel(name) }
+        var value = self; value.model = name.trimmed; return value
+    }
     var secretValues: [String] {
         var values = apiKey.isEmpty ? [] : [apiKey]
         for line in extraHeaders.components(separatedBy: .newlines) {
@@ -289,7 +332,7 @@ struct Credential: Identifiable, Codable, Equatable {
             if !value.isEmpty { values.append(value) }
             let authorization = value.split(maxSplits: 1, whereSeparator: \.isWhitespace)
             if authorization.count == 2, ["bearer", "basic"].contains(authorization[0].lowercased()) { values.append(String(authorization[1]).trimmed) }
-            if pair[0].trimmed.lowercased() == "cookie" {
+            if ["cookie", "set-cookie"].contains(pair[0].trimmed.lowercased()) {
                 for part in value.split(separator: ";") {
                     let cookie = part.split(separator: "=", maxSplits: 1)
                     guard cookie.count == 2 else { continue }
@@ -314,13 +357,16 @@ struct Credential: Identifiable, Codable, Equatable {
     }
     var searchText: String { ([name, provider, baseURL, purpose, notes, tags] + modelOptions).joined(separator: " ") }
     func searchMatch(for text: String) -> CredentialSearchMatch? {
+        searchMatch(for: text, modelChoices: modelOptions)
+    }
+    func searchMatch(for text: String, modelChoices: @autoclosure () -> [String]) -> CredentialSearchMatch? {
         let query = text.trimmed
         guard !query.isEmpty else { return CredentialSearchMatch(rank: 0) }
         for (value, baseRank) in [(name, 0), (provider, 3)] where value.localizedCaseInsensitiveContains(query) {
             if value.localizedCaseInsensitiveCompare(query) == .orderedSame { return CredentialSearchMatch(rank: baseRank) }
             return CredentialSearchMatch(rank: baseRank + (value.range(of: query, options: [.anchored, .caseInsensitive]) != nil ? 1 : 2))
         }
-        if let matched = modelOptions.first(where: { $0.localizedCaseInsensitiveContains(query) }) {
+        if let matched = modelChoices().first(where: { $0.localizedCaseInsensitiveContains(query) }) {
             return CredentialSearchMatch(rank: 6, detail: "模型：" + matched)
         }
         for (value, rank, label) in [(purpose, 7, "用途"), (tags, 8, "标签"), (baseURL, 9, "地址")] where value.localizedCaseInsensitiveContains(query) {
@@ -450,15 +496,19 @@ extension String {
         }
     }
     func replacingSecrets(_ replacements: [String: String]) -> String {
-        let keys = replacements.keys.filter { !$0.isEmpty }.sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
-        guard !keys.isEmpty, let expression = try? NSRegularExpression(pattern: keys.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")) else { return self }
+        let length = utf16.count
+        let keys = replacements.keys.filter { !$0.isEmpty && $0.utf16.count <= length }.sorted { $0.count == $1.count ? $0 < $1 : $0.count > $1.count }
+        guard !keys.isEmpty, let expression = RegexCache.expression(keys.map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")) else { return self }
         let original = self as NSString
         let matches = expression.matches(in: self, range: NSRange(location: 0, length: original.length))
-        let result = NSMutableString(string: self)
-        for match in matches.reversed() {
-            if let replacement = replacements[original.substring(with: match.range)] { result.replaceCharacters(in: match.range, with: replacement) }
+        guard !matches.isEmpty else { return self }
+        var result = "", offset = 0; result.reserveCapacity(utf8.count)
+        for match in matches {
+            result += original.substring(with: NSRange(location: offset, length: match.range.location - offset))
+            result += replacements[original.substring(with: match.range)] ?? original.substring(with: match.range)
+            offset = NSMaxRange(match.range)
         }
-        return result as String
+        result += original.substring(from: offset); return result
     }
 }
 

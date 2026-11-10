@@ -125,7 +125,7 @@ private final class AgentFixture: @unchecked Sendable {
             let marker = outside.appendingPathComponent("private-fixture.txt"); try Data("must-not-be-readable".utf8).write(to:marker); fixture.outside = marker.path
             var service = DeepChecks.record(); service.baseURL = fixture.base+"/organizer/v1"; service.apiKey = "fixture-organizer-secret"
             var progress: [String] = []
-            let result = try await ImportAgent.run(raw:"API Key: \(fixture.key)\n接口文档：\(fixture.base)/guide",service:service,model:"fixture-organizer",images:[],allowLocalDocuments:true,progress:{progress.append($0)})
+            let result = try await ImportAgent.run(raw:"API Key: \(fixture.key)\n接口文档：\(fixture.base)/guide",service:service,model:"fixture-organizer",images:[],promptConfiguration:.init(directory:outside.appendingPathComponent("prompts")),allowLocalDocuments:true,progress:{progress.append($0)})
             expectEqual(result.records.count,1); expectEqual(result.records.first?.apiKey,fixture.key)
             expectEqual(result.records.first?.model,"fixture-good"); expectEqual(result.records.first?.check?.state,.valid)
             expectTrue(result.records.first?.callTemplate != nil); expectTrue(progress.contains("编写临时代码")); expectTrue(progress.contains("运行临时命令"))
@@ -164,6 +164,10 @@ private final class AgentFixture: @unchecked Sendable {
             for _ in 0..<100 { if kill(pid,0) == -1 { break }; try await Task.sleep(for:.milliseconds(10)) }
             expectTrue(kill(pid,0) == -1)
             checkpoint("Agent.stopping-from-a-cancelled-task-kills-official-bash-child-before-command-timeout")
+            for _ in 0..<8 { worker.requestCancel() }
+            do { try await worker.send(["type": "cancel"]); checkFailures.append("Closed Agent accepted a late write") } catch {}
+            await worker.shutdown()
+            checkpoint("Agent.late-cancel-send-and-repeated-shutdown-do-not-access-closed-pipe-handles")
         } catch { checkFailures.append("agent cancellation: "+error.localizedDescription); checkpoint("Agent.cancellation") }
     }
 }

@@ -12,9 +12,13 @@ struct AgentVerification {
             let payload = try APIClient.modelPayload(for: record); path = payload.path; body = payload.body
             if record.kind != .gemini { body["stream"] = false }
         }
+        // A conventional endpoint such as /chat/completions is still
+        // relative to the configured Base URL, including its gateway prefix.
+        if path.hasPrefix("/"), !path.hasPrefix("//") { path.removeFirst() }
         guard !path.isEmpty, path.utf8.count < 2048, !path.hasPrefix("/"), !path.contains("://"), !path.contains(".."), !path.contains("?"), !path.contains("#"), !path.contains("\\") else {
-            throw KeyDockError.message("请使用相对于 Base URL 的接口路径，不重复基础地址或版本，不使用查询参数及路径穿越。")
+            throw KeyDockError.message("接口路径请填 chat/completions 或 /chat/completions，不填完整地址、查询参数或路径穿越。")
         }
+        guard path.range(of: #"^v[0-9]+(?:beta[0-9]*)?/"#, options: .regularExpression) == nil else { throw KeyDockError.message("路径不需要重复版本；例如 Base URL 已含 /v1 时，请填 chat/completions。") }
         if let provided = arguments["body"] as? String, !provided.isEmpty {
             guard provided.utf8.count <= 16_384, let data = provided.data(using: .utf8), let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw KeyDockError.message("验证正文必须是小于 16 KB 的 JSON 对象。") }
             body = json

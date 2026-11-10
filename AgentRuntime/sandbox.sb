@@ -14,6 +14,7 @@
 (allow file-read* file-write* file-map-executable (subpath (param "KEYDOCK_TASK_DIR")))
 (allow file-read* (literal "/dev/urandom") (literal "/dev/random")
     (literal "/private/etc/hosts") (literal "/private/etc/resolv.conf")
+    (literal "/private/etc/ssl/openssl.cnf") (literal "/private/etc/ssl/cert.pem")
     (subpath "/private/var/db/timezone"))
 (allow file-read* file-write* (literal "/dev/null") (subpath "/dev/fd"))
 (allow network-outbound)

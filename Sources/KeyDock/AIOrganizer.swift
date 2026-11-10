@@ -33,12 +33,12 @@ struct RedactedImport {
 enum AIOrganizer {
     static let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 120; configuration.timeoutIntervalForResource = 180
-        configuration.httpCookieStorage = nil; configuration.urlCache = nil
+        configuration.timeoutIntervalForRequest = ProxyTransportPolicy().idleTimeout; configuration.timeoutIntervalForResource = ProxyTransportPolicy().resourceTimeout
+        configuration.httpCookieStorage = nil; configuration.urlCredentialStorage = nil; configuration.urlCache = nil
         return URLSession(configuration: configuration, delegate: APIClient.delegate, delegateQueue: nil)
     }()
     static func organize(_ redacted: RedactedImport, reviewedText: String, service: Credential, model: String, original: String, images: [ImportImage] = [], session: URLSession = AIOrganizer.session) async throws -> [Credential] {
-        let service = ProviderPreset.configuration(service)
+        let service = ProviderPreset.configuration(service.usingModel(model))
         guard service.kind != .custom, !model.trimmed.isEmpty else { throw KeyDockError.message("请选择大模型服务并填写模型名称。") }
         if let issue = service.modelIssue(model) { throw KeyDockError.message(issue) }
         guard (!reviewedText.trimmed.isEmpty || !images.isEmpty), reviewedText.utf8.count <= 100_000 else { throw KeyDockError.message("请添加文字或图片；文字不能超过 100 KB。") }
@@ -64,7 +64,7 @@ enum AIOrganizer {
         }
         let url = try APIClient.endpoint(base: service.baseURL, suffix: suffix, defaultVersion: service.kind == .gemini ? "v1beta" : "v1")
         var request = try APIClient.authenticatedRequest(url: url, record: service)
-        request.httpMethod = "POST"; request.timeoutInterval = 120
+        request.httpMethod = "POST"; request.timeoutInterval = ProxyTransportPolicy().idleTimeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let prompt = """
         你是智能凭据整理器。理解整段零散聊天、无标签值、表格、文档截图和 curl，判断哪些值是 API Key、tokenId、地址、模型、用途和备注，以及它们的对应关系。
@@ -118,7 +118,9 @@ enum AIOrganizer {
             let message = choices.first?["message"] as? [String: Any] ?? [:]
             content = message["content"] as? String ?? ""
         }
-        return try records(from: content, redacted: redacted, fullSource: fullSource, hasImages: !images.isEmpty)
+        var result = try records(from: content, redacted: redacted, fullSource: fullSource, hasImages: !images.isEmpty)
+        for index in result.indices { result[index].source = original; result[index].sourceImages = images.isEmpty ? nil : images }
+        return result
     }
     static func records(from content: String, redacted: RedactedImport, fullSource: String, hasImages: Bool) throws -> [Credential] {
         guard let begin = content.firstIndex(of: "["), let end = content.lastIndex(of: "]"), begin <= end else { throw KeyDockError.message("模型没有返回可识别的 JSON，请使用本地识别或重试。") }
@@ -167,6 +169,7 @@ enum AIOrganizer {
         let normalized = ImportParser.normalizeBase(raw)
         guard let url = try? APIClient.safeURL(normalized), var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
         parts.host = parts.host?.lowercased(); parts.scheme = parts.scheme?.lowercased()
+        if ["", "/", "/v1", "/v1/"].contains(parts.path) { parts.path = "" }
         if parts.port == 443 && parts.scheme == "https" { parts.port = nil }
         return parts.string?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }

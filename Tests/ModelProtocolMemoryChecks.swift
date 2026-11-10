@@ -48,6 +48,21 @@ import CryptoKit
                 expectTrue(store.selected?.modelOptions.contains("added-model") == true)
             }
         }
+        runCheck("ModelProtocols.switching-to-a-catalog-model-keeps-an-unlisted-original-model-available") {
+            try NewFeatureChecks.isolated { root in
+                let key = SymmetricKey(size: .bits256), disk = EncryptedVault(directory: root, keyProvider: { key })
+                let store = VaultStore(disk: disk, automaticProxy: false)
+                var record = DeepChecks.record(); record.kind = .anthropic; record.auth = .xAPIKey; record.model = "unlisted-messages-model"
+                record.modelCatalog = ModelCatalog(models: ["catalog-chat-model", "another-model"])
+                expectTrue(store.save(record)); store.selectModel("catalog-chat-model", for: try unwrap(store.selected))
+                expectTrue(store.selected?.modelOptions.contains("unlisted-messages-model") == true)
+                expectEqual(store.selected?.inferenceKind, .compatible)
+                let reopened = VaultStore(disk: disk, automaticProxy: false)
+                reopened.selectModel("unlisted-messages-model", for: try unwrap(reopened.selected))
+                expectEqual(reopened.selected?.inferenceKind, .anthropic); expectEqual(reopened.selected?.availableModels.count, 2)
+                expectTrue(reopened.selected?.modelOptions.contains("catalog-chat-model") == true)
+            }
+        }
         runCheck("ModelProtocols.protocol-and-model-change-clear-stale-proof-but-idempotent-choice-keeps-it") {
             try NewFeatureChecks.isolated { root in
                 let key = SymmetricKey(size: .bits256), store = VaultStore(disk: EncryptedVault(directory: root, keyProvider: { key }), automaticProxy: false)

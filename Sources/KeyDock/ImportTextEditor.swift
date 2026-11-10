@@ -2,37 +2,51 @@ import SwiftUI
 import AppKit
 
 struct ImportDocument {
-    var content: NSAttributedString
-    init(_ paste: ImportPaste = ImportPaste()) { content = Self.attributed(paste) }
-    init(content: NSAttributedString) { self.content = NSAttributedString(attributedString: content) }
-    var images: [ImportImage] {
-        var result: [ImportImage] = []
-        content.enumerateAttribute(.attachment, in: NSRange(location: 0, length: content.length)) { value, _, _ in
-            if let image = (value as? ImportImageAttachment)?.value, !result.contains(where: { $0.fingerprint == image.fingerprint }) { result.append(image) }
+    private final class Storage {
+        let content: NSAttributedString
+        let lock = NSLock()
+        var cached: (text: String, paste: ImportPaste)?
+        var builds = 0
+        init(_ content: NSAttributedString) { self.content = NSAttributedString(attributedString: content) }
+        func derived() -> (text: String, paste: ImportPaste) {
+            lock.lock(); defer { lock.unlock() }
+            if let cached { return cached }
+            builds += 1
+            var images: [ImportImage] = [], positions: [(NSRange, String)] = []
+            content.enumerateAttribute(.attachment, in: NSRange(location: 0, length: content.length)) { value, range, _ in
+                guard let image = (value as? ImportImageAttachment)?.value else { return }
+                let index: Int
+                if let existing = images.firstIndex(where: { $0.fingerprint == image.fingerprint }) { index = existing }
+                else { index = images.count; images.append(image) }
+                positions.append((range, "[图片 \(index + 1)]"))
+            }
+            let raw = content.string, source = raw as NSString
+            var text = "", offset = 0
+            if positions.isEmpty { text = raw }
+            else {
+                for (range, label) in positions { text += source.substring(with: NSRange(location: offset, length: range.location - offset)) + label; offset = NSMaxRange(range) }
+                text += source.substring(from: offset)
+            }
+            let value = (text: text, paste: ImportPaste(text: raw.replacingOccurrences(of: "\u{fffc}", with: ""), images: images))
+            cached = value; return value
         }
-        return result
     }
-    var text: String {
-        let result = NSMutableAttributedString(attributedString: content)
-        var positions: [(NSRange, String)] = []
-        let ordered = images
-        content.enumerateAttribute(.attachment, in: NSRange(location: 0, length: content.length)) { value, range, _ in
-            if let image = (value as? ImportImageAttachment)?.value, let index = ordered.firstIndex(where: { $0.fingerprint == image.fingerprint }) { positions.append((range, "[图片 \(index + 1)]")) }
-        }
-        for (range, label) in positions.reversed() { result.replaceCharacters(in: range, with: label) }
-        return result.string
-    }
-    var paste: ImportPaste {
-        // Image labels belong to the model's text view, not to the editable document.
-        ImportPaste(text: content.string.replacingOccurrences(of: "\u{fffc}", with: ""), images: images)
-    }
+    private var storage: Storage
+    var identity: ObjectIdentifier { ObjectIdentifier(storage) }
+    var derivationCount: Int { storage.lock.lock(); defer { storage.lock.unlock() }; return storage.builds }
+    var content: NSAttributedString { get { storage.content } set { storage = Storage(newValue) } }
+    init(_ paste: ImportPaste = ImportPaste()) { storage = Storage(Self.attributed(paste)) }
+    init(content: NSAttributedString) { storage = Storage(content) }
+    var images: [ImportImage] { storage.derived().paste.images }
+    var text: String { storage.derived().text }
+    var paste: ImportPaste { storage.derived().paste }
     mutating func append(_ paste: ImportPaste) throws {
         let result = NSMutableAttributedString(attributedString: content)
         if result.length > 0 && (!paste.text.isEmpty || !paste.images.isEmpty) { result.append(NSAttributedString(string: "\n", attributes: Self.attributes)) }
         let newImages = paste.images.filter { image in !images.contains(where: { $0.fingerprint == image.fingerprint }) }
         result.append(Self.attributed(ImportPaste(text: paste.text, images: newImages)))
         let candidate = ImportDocument(content: result); try ImportImage.validate(candidate.images)
-        content = candidate.content
+        self = candidate
     }
     static var attributes: [NSAttributedString.Key: Any] {
         let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .left; paragraph.lineSpacing = 5
@@ -59,7 +73,7 @@ final class ImportImageAttachment: NSTextAttachment {
     private func configureCell() {
         fileWrapper = FileWrapper(regularFileWithContents: value.data)
         fileWrapper?.preferredFilename = "image-" + value.id.uuidString + ".jpg"
-        if let image = value.preview {
+        if let image = value.thumbnail {
             let scale = min(1, 340 / max(1, image.size.width), 190 / max(1, image.size.height))
             image.size = NSSize(width: image.size.width * scale, height: image.size.height * scale)
             attachmentCell = NSTextAttachmentCell(imageCell: image)
@@ -100,7 +114,7 @@ struct ImportTextEditor: NSViewRepresentable {
         editor.typingAttributes = ImportDocument.attributes
         editor.onError = { [weak coordinator = context.coordinator] message in coordinator?.parent.onError(message) }
         editor.onPreview = { [weak coordinator = context.coordinator] image in coordinator?.parent.onPreview(image) }
-        editor.onDocumentChange = { [weak coordinator = context.coordinator] content in coordinator?.parent.document = ImportDocument(content: content) }
+        editor.onDocumentChange = { [weak coordinator = context.coordinator] content in coordinator?.changed(content) }
         scroll.documentView = editor
         DispatchQueue.main.async { editor.window?.makeFirstResponder(editor) }
         return scroll
@@ -108,7 +122,8 @@ struct ImportTextEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? PasteTextView else { return }
-        if !editor.hasMarkedText(), !editor.attributedString().isEqual(to: document.content) {
+        if !editor.hasMarkedText(), context.coordinator.identity != document.identity {
+            context.coordinator.identity = document.identity
             editor.textStorage?.setAttributedString(document.content)
             editor.setSelectedRange(NSRange(location: document.content.length, length: 0)); editor.typingAttributes = ImportDocument.attributes
         }
@@ -125,9 +140,13 @@ struct ImportTextEditor: NSViewRepresentable {
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ImportTextEditor
+        var identity: ObjectIdentifier?
         init(_ parent: ImportTextEditor) { self.parent = parent }
+        func changed(_ content: NSAttributedString) {
+            let document = ImportDocument(content: content); identity = document.identity; parent.document = document
+        }
         func textDidChange(_ notification: Notification) {
-            if let editor = notification.object as? NSTextView { parent.document = ImportDocument(content: editor.attributedString()) }
+            if let editor = notification.object as? NSTextView { changed(editor.attributedString()) }
         }
         func textView(_ textView: NSTextView, doubleClickedOn cell: NSTextAttachmentCellProtocol, in cellFrame: NSRect, at charIndex: Int) {
             if let image = (cell.attachment as? ImportImageAttachment)?.value { parent.onPreview(image) }
